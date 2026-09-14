@@ -30,7 +30,9 @@ function M.colors()
     RillDeleteText = { bg = mix(bg, del, 0.32), bold = true },
     RillAddSign = { fg = add },
     RillDeleteSign = { fg = del },
-    RillHeader = { fg = fg, bg = mix(bg, fg, 0.06), bold = true },
+    RillHeader = { fg = fg, bg = mix(bg, fg, 0.12), bold = true },
+    RillBarKey = { fg = fg, bg = color("WinBar", "bg", bg), bold = true },
+    RillBarHint = { fg = muted, bg = color("WinBar", "bg", bg) },
     RillGap = { fg = muted, bg = mix(bg, fg, 0.025) },
     RillMuted = { fg = muted },
     RillNumber = { fg = muted },
@@ -204,10 +206,10 @@ function M.words(file, done)
   end)
 end
 
--- Neovim 0.11's own async parser chains vim.schedule() and can starve input until
--- parsing completes. Bound full-source parsing before starting it; large files
--- retain their diff/word colors. Callers may raise these limits deliberately.
-local MAX_SOURCE_LINES, MAX_SOURCE_BYTES, MAX_SPANS = 3000, 256 * 1024, 100000
+-- Default syntax coverage matches readable Git sources. Capture indexing stays
+-- cooperative; Neovim's native parse can still take longer on large files. Users
+-- who prefer stricter latency can lower these limits without changing Git reads.
+local MAX_SOURCE_LINES, MAX_SOURCE_BYTES, MAX_SPANS = 100000, 1024 * 1024, 100000
 
 local function release(file, parser)
   if not parser then

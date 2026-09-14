@@ -203,6 +203,30 @@ local function place(session, side, line, file_id)
 end
 
 return {
+  ["Tab cycles actual files in stream and focus while gs changes layout"] = function()
+    with_review(function(session)
+      place(session, "new", 4)
+      local function press(key)
+        local binding = vim.fn.maparg(key, "n", false, true)
+        H.eq("function", type(binding.callback), "expected local action for " .. key)
+        binding.callback()
+      end
+      press("<Tab>")
+      H.eq("second", session:current().meta.id)
+      H.eq("unified", session.layout)
+      session:toggle_focus()
+      press("<Tab>")
+      H.eq("first", session.focus_id)
+      press("<S-Tab>")
+      H.eq("second", session.focus_id)
+      press("gs")
+      H.eq("split", session.layout)
+      H.eq("second", session.focus_id)
+      press("<Tab>")
+      H.eq("first", session.focus_id)
+    end)
+  end,
+
   ["unified selections preserve old paths revisions and mixed source ranges"] = function()
     with_review(function(session, env)
       local first, last = at_source(session, "old", 4), at_source(session, "new", 5)

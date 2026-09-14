@@ -201,7 +201,7 @@ return {
       H.eq({ old = {}, new = {} }, absent.syntax)
       H.eq(1, attempts)
       for _, file in ipairs({
-        { meta = { path = "file.lua" }, old_source = vim.fn["repeat"]({ "line" }, 15001) },
+        { meta = { path = "file.lua" }, old_source = vim.fn["repeat"]({ "line" }, 100001) },
         { meta = { path = "file.lua" }, old_source = { string.rep("a", 1024 * 1024 + 1) } },
         { meta = { path = "unrecognized.rrrunknown" }, old_source = { "plain text" } },
       }) do
@@ -217,7 +217,7 @@ return {
     end
   end,
 
-  source_limits_are_conservative_and_independently_configurable = function()
+  source_limits_cover_readable_files_and_are_independently_configurable = function()
     local original, attempts = vim.treesitter.get_string_parser, 0
     vim.treesitter.get_string_parser = function()
       attempts = attempts + 1
@@ -225,8 +225,8 @@ return {
     end
     local ok, err = xpcall(function()
       for _, file in ipairs({
-        { meta = { path = "file.lua" }, old_source = vim.fn["repeat"]({ "local a = 1" }, 3001) },
-        { meta = { path = "file.lua" }, old_source = { string.rep("x", 256 * 1024) } },
+        { meta = { path = "file.lua" }, old_source = vim.fn["repeat"]({ "local a = 1" }, 100001) },
+        { meta = { path = "file.lua" }, old_source = { string.rep("x", 1024 * 1024) } },
         {
           meta = { path = "file.lua" },
           old_source = { "first", "second" },
@@ -241,10 +241,9 @@ return {
       local larger = {
         meta = { path = "file.lua" },
         old_source = vim.fn["repeat"]({ "local a = 1" }, 3001),
-        syntax_limits = { max_lines = 4000, max_bytes = 512 * 1024 },
       }
       await(Highlight.syntax, larger)
-      H.eq(1, attempts, "explicit higher limits must reach the parser")
+      H.eq(1, attempts, "default coverage must include sources above the old 3000-line cutoff")
     end, debug.traceback)
     vim.treesitter.get_string_parser = original
     if not ok then

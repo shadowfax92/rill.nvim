@@ -62,7 +62,9 @@ REVIEW KEYS                                                 *rill-keys*
 
 All mappings below are local to Rill buffers.
 
-    <Tab>       Toggle unified / split
+    <Tab>       Next file (also in file focus)
+    <S-Tab>     Previous file
+    gs          Toggle unified / split
     gf          Focus file / return to stream
     <CR>        Open source, expand gap, or select tree entry
     ]f / [f     Next / previous file
@@ -114,8 +116,8 @@ Defaults: >lua
       context_step = 20,
       wrap = false,                       -- unified only
       syntax = true,                      -- installed Tree-sitter parsers
-      syntax_max_lines = 3000,
-      syntax_max_bytes = 256 * 1024,
+      syntax_max_lines = 100000,
+      syntax_max_bytes = 1024 * 1024,
       sidekick = true,                    -- optional buffer-local bindings
       max_file_bytes = 1024 * 1024,        -- source and per-file patch bytes
       max_changed_lines = 20000,          -- additions + deletions per file
@@ -284,13 +286,12 @@ Refresh or close invalidates obsolete asynchronous results.
 
 Syntax belongs to complete old/new sources rather than patch fragments. Captures
 are cached by source coordinates and painted only for visible review rows.
-Normalization and capture indexing use cooperative batches (4ms/256-item budget).
-Missing parsers produce plain text. Syntax skips sources over 3000 lines or
-256 KiB by default and caps capture spans at 100000 per side. Intraline highlighting skips
-paired lines over 1000 bytes. These syntax limits are independent of Git limits.
-Increasing syntax_max_lines/bytes permits more full-source highlighting but can
-delay input during Neovim's native parsing. Diff and intraline colors remain
-available when full syntax is skipped.
+Normalization and capture indexing use cooperative batches (4ms/1024-item budget).
+Missing parsers produce plain text. Default syntax limits match readable Git
+sources: 100000 lines / 1 MiB, with at most 100000 capture spans per side.
+Large files finish highlighting asynchronously and repaint without scrolling.
+Lower syntax_max_lines/bytes to trade coverage for stricter native-parser latency.
+Intraline highlighting skips paired lines over 1000 bytes.
 
 source_cache_bytes is a target for retained source/highlight data. Visible files
 and files explicitly expanded by the user can remain pinned above the target;

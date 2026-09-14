@@ -1,7 +1,7 @@
 # Rill
 
 A native Git review surface for Neovim. Read changed files in one continuous
-unified diff, switch to side-by-side with **Tab**, or focus one file with **gf**.
+unified diff, switch to side-by-side with **gs**, or focus one file with **gf**.
 Layout and file focus are independent.
 
 Rill is a read-only review document. **Enter** opens the corresponding source:
@@ -34,7 +34,9 @@ return {
 }
 ```
 
-Open `:Rill`, then try **Tab**, **gf**, **zR**, and **g?**.
+Open `:Rill`: **Tab / Shift-Tab** move between files, **gs** switches layout,
+and **gf** focuses a file. The top bar keeps these actions and context/source
+shortcuts visible; **g?** opens the full key list.
 
 The companion personal Neovim configuration also supplies an asynchronous
 Telescope commit picker: `<leader>go` for the last 50 commits, `<leader>gO` for all
@@ -69,7 +71,8 @@ an empty-tree baseline where applicable.
 
 | Key | Action |
 | --- | --- |
-| `Tab` | Toggle unified / split, preserving source position |
+| `Tab` / `Shift-Tab` | Next / previous file, including in file focus |
+| `gs` | Toggle unified / split, preserving source position |
 | `gf` | Focus current file / return to the stream |
 | `Enter` | Open source; expand a gap; select a tree file or directory |
 | `]f` / `[f` | Next / previous file |
@@ -128,8 +131,8 @@ require("rill").setup({
   context_step = 20,
   wrap = false, -- unified only
   syntax = true,
-  syntax_max_lines = 3000,
-  syntax_max_bytes = 256 * 1024,
+  syntax_max_lines = 100000,
+  syntax_max_bytes = 1024 * 1024,
   sidekick = true,
   max_file_bytes = 1024 * 1024,
   max_changed_lines = 20000,
@@ -167,11 +170,12 @@ above that target. Layout changes reuse the review document.
 
 Per-file source and patch reads default to 1 MiB, changed lines to 20,000 per
 file, and retained patches to 16 MiB per review. Full-source reads also have a
-100,000-line ceiling. Syntax indexing independently skips sources above 3,000
-lines or 256 KiB by default and caps capture spans at 100,000 per side. Intraline highlighting
-skips paired lines longer than 1,000 bytes. The syntax limits keep Neovim’s native
-parser from delaying input on large files; increasing them trades responsiveness
-for full syntax coverage.
+100,000-line ceiling. Syntax defaults match these readable-source limits, so a
+large readable file can finish highlighting instead of stopping at a separate
+small-file cutoff. Captures repaint as soon as indexing completes. Lower
+`syntax_max_lines` / `syntax_max_bytes` if you prefer stricter parser latency.
+Syntax caps captures at 100,000 per side; intraline highlighting skips paired
+lines longer than 1,000 bytes.
 
 Binary files, submodules, file-type changes, unresolved conflicts, and oversized
 changes remain visible as explanatory entries. Large generated files receive
@@ -186,6 +190,9 @@ make test
 # Optional: point integration tests at a Sidekick checkout.
 RILL_SIDEKICK_PATH=/path/to/sidekick.nvim make test
 ```
+
+With tmux available, the suite also starts an isolated real terminal UI to check
+painted diff backgrounds and delayed syntax without scrolling.
 
 Tests cover real temporary Git repositories, source mapping, layouts and
 expansion, cancellation, syntax, and Sidekick capture without real delivery.

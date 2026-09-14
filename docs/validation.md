@@ -29,10 +29,16 @@ headless materialization and event-loop responsiveness, not terminal pixel paint
 | One 10,000-line file, 100 replacements | ~36 ms | ~11 ms median with the full file expanded | 12–27 ms |
 
 The largest observed event-loop heartbeat gap was 21.4 ms. Full syntax is skipped
-for the 10,000-line source under the default 3,000-line/256 KiB limit; diff and
+for the 10,000-line source under the initial 3,000-line/256 KiB limit; diff and
 intraline colors remain available. Capture workers cross real timer turns.
 
 These fixtures establish an initial baseline, not a latency guarantee for every
 repository, grammar, filesystem or terminal. Projection still materializes the
 retained compact patch synchronously; unusually large reviews use the configured
 patch/source budgets and metadata placeholders.
+
+The rendering follow-up raises default syntax coverage to readable-source limits.
+The earlier syntax-enabled timings above therefore describe the initial cutoff,
+not full parsing of the 10,000-line fixture. The attached-terminal regression now
+checks actual RGB backgrounds, full-width header bands, and delayed syntax paint;
+it fails on the original ephemeral line highlighting and ordinary-redraw paths.

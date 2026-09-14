@@ -55,6 +55,12 @@ local function source_side(row, side)
 end
 
 local function mark(buf, row, opts)
+  -- line_hl_group is ignored on ephemeral marks in Neovim 0.11. A highlighted
+  -- range crossing the newline paints the code and extends to the window edge,
+  -- while keeping all diff decoration scoped to the current viewport/redraw.
+  opts.hl_group = opts.line_hl_group
+  opts.line_hl_group = nil
+  opts.end_row, opts.end_col, opts.hl_eol = row + 1, 0, true
   opts.ephemeral = true
   api.nvim_buf_set_extmark(buf, ns, row, 0, opts)
 end
@@ -104,6 +110,16 @@ local function initialize()
     group = group,
     callback = function()
       require("rill.highlight").colors()
+    end,
+  })
+  api.nvim_create_autocmd("WinResized", {
+    group = group,
+    callback = function()
+      for _, session in pairs(M.sessions) do
+        if not session.closed then
+          session:titles()
+        end
+      end
     end,
   })
   api.nvim_create_autocmd("TabClosed", {
@@ -302,12 +318,14 @@ function Session:titles()
   for index, win in ipairs({ self.main_win, self.right_win }) do
     if valid_win(win) then
       local side = self.layout == "split" and (index == 1 and "Before · " or "After · ") or ""
-      vim.wo[win].winbar = "%#RillMuted# " .. side .. escaped(title) .. " · " .. mode
-      vim.wo[win].statusline = "%#RillMuted# Rill · %<"
-        .. escaped(path)
-        .. "%="
-        .. #self.files
-        .. " files  ·  Tab layout  gf focus  g? help "
+      vim.wo[win].winbar = require("rill.bar").render({
+        title = side .. display_label(title) .. " · " .. mode,
+        width = api.nvim_win_get_width(win),
+        layout = self.layout,
+        side = index == 1 and "old" or "new",
+        focused = self.focus_id ~= nil,
+      })
+      vim.wo[win].statusline = "%#RillMuted# Rill · %<" .. escaped(path) .. "%=" .. #self.files .. " files "
     end
   end
   if valid_win(self.tree_win) then
@@ -323,6 +341,28 @@ local function set_lines(buf, lines)
   api.nvim_buf_set_lines(buf, 0, -1, false, #lines > 0 and lines or { "" })
   vim.bo[buf].modifiable = false
   vim.bo[buf].modified = false
+end
+
+-- Updating capture caches alone does not dirty Neovim's screen lines. Force a
+-- repaint of our windows when a decoration job finishes, coalescing completions
+-- so syntax appears in place without waiting for scrolling or cursor movement.
+function Session:repaint()
+  if self.repaint_scheduled or self.closed then
+    return
+  end
+  self.repaint_scheduled = true
+  vim.schedule(function()
+    self.repaint_scheduled = false
+    if self.closed or #api.nvim_list_uis() == 0 then
+      return
+    end
+    for _, win in ipairs({ self.main_win, self.right_win }) do
+      if valid_win(win) then
+        api.nvim__redraw({ win = win, valid = false })
+      end
+    end
+    api.nvim__redraw({ flush = true })
+  end)
 end
 
 function Session:anchor()
@@ -727,11 +767,7 @@ function Session:queue_visible()
         self.cache:touch(file)
         local function redraw()
           if not self.closed then
-            -- Headless consumers have no grid to repaint. In particular, older
-            -- 0.11 builds cannot safely redraw a manually resized headless grid.
-            if #api.nvim_list_uis() > 0 then
-              vim.cmd.redraw()
-            end
+            self:repaint()
             self:prune_cache()
           end
         end
@@ -890,6 +926,21 @@ function Session:jump_file(file)
     self:highlight_tree()
     self:queue_visible()
   end
+end
+
+function Session:cycle_file(direction)
+  if #self.files == 0 then
+    return
+  end
+  local current = self:current()
+  local index = direction > 0 and 0 or 1
+  for i, file in ipairs(self.files) do
+    if file == current then
+      index = i
+      break
+    end
+  end
+  self:jump_file(self.files[(index - 1 + direction) % #self.files + 1])
 end
 
 function Session:move(kind, direction)
@@ -1086,7 +1137,8 @@ function Session:help()
   local lines = {
     "Rill · Git review",
     "",
-    "Tab       unified / split",
+    "Tab / S-Tab  next / previous file",
+    "gs        unified / split",
     "gf        focus current file / return to stream",
     "[f / ]f   previous / next file",
     "[c / ]c   previous / next hunk",
@@ -1144,6 +1196,18 @@ function Session:keys(buf, tree)
       end,
     },
     ["<Tab>"] = {
+      "Next file",
+      function()
+        self:cycle_file(1)
+      end,
+    },
+    ["<S-Tab>"] = {
+      "Previous file",
+      function()
+        self:cycle_file(-1)
+      end,
+    },
+    ["gs"] = {
       "Toggle unified / split",
       function()
         self:toggle_layout()
