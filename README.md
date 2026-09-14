@@ -13,16 +13,14 @@ Requires **Neovim 0.11+** and **Git**. There are no required Lua dependencies.
 Installed Tree-sitter parsers provide optional syntax highlighting; Sidekick is
 an optional integration.
 
-## Try the local checkout
+## Install
 
-This checkout can be used immediately; a published GitHub repository is not
-required. With lazy.nvim:
+With lazy.nvim:
 
 ```lua
 return {
   {
-    name = "rill.nvim",
-    dir = vim.fn.expand("~/code/side-projects/rill.nvim"),
+    "shadowfax92/rill.nvim",
     main = "rill",
     cmd = { "Rill", "RillClose", "RillToggle", "RillFocus", "RillRefresh" },
     opts = {},
@@ -32,6 +30,14 @@ return {
     },
   },
 }
+```
+
+For local development, add `dir` to the plugin spec. This prefers a checkout
+when present and otherwise installs from GitHub:
+
+```lua
+dir = vim.fn.isdirectory(vim.fn.expand("~/code/side-projects/rill.nvim")) == 1
+  and vim.fn.expand("~/code/side-projects/rill.nvim") or nil,
 ```
 
 Open `:Rill`: **Tab / Shift-Tab** move between files, **gs** switches layout,
