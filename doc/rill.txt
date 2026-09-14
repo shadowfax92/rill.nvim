@@ -1,0 +1,303 @@
+*rill.txt*  Native Git review for Neovim                         *rill.nvim*
+
+Rill shows a continuous, read-only review of changed Git files. Unified and
+split layouts share source identities; file focus is independent of layout.
+Requires Neovim 0.11+ and Git. Tree-sitter parsers and Sidekick are optional.
+
+CONTENTS                                                        *rill*
+
+  Commands ................................................ |rill-commands|
+  Review keys ............................................. |rill-keys|
+  Configuration ........................................... |rill-setup|
+  Lua API ................................................. |rill-api|
+  Integration context ..................................... |rill-context|
+  Sidekick ................................................ |rill-sidekick|
+  Limits .................................................. |rill-limits|
+
+==============================================================================
+COMMANDS                                                   *rill-commands*
+
+:Rill [mode/revision] [--split|--unified] [-- paths...]         *:Rill*
+
+    :Rill                         HEAD to worktree, including untracked files
+    :Rill working                 Same as :Rill
+    :Rill staged                  HEAD to index
+    :Rill unstaged                Index to worktree, including untracked files
+    :Rill branch [base]            Merge base of base and HEAD to HEAD
+    :Rill commit [rev]             First parent to rev (default HEAD)
+    :Rill range <base> <head>       Direct comparison of two snapshots
+    :Rill A..B                     Direct comparison of A and B
+    :Rill A...B                    Merge base of A and B to B
+    :Rill <rev>                    Same as :Rill commit <rev>
+
+    Branch mode defaults to origin/HEAD, then local main, then local master.
+    Pass an explicit base for stacked branches or other upstreams. Root commits
+    and unborn HEAD use an empty tree where an ordinary parent is unavailable.
+    A merge commit is compared with its first parent; no combined merge UI is
+    provided. Branch and revision modes exclude uncommitted changes.
+
+    Worktree means files on disk, not unsaved buffer contents. "Working" is the
+    net comparison against HEAD, not separate staged and unstaged sections.
+    Text after -- is treated as literal repository-relative file/directory paths. Examples: >
+
+        :Rill --split -- lua tests
+        :Rill branch origin/main
+        :Rill range HEAD~3 HEAD -- src/server.lua
+        :Rill main...HEAD --unified
+<
+:RillClose                                                   *:RillClose*
+    Close the current review tab and cancel its owned work.
+
+:RillToggle                                                  *:RillToggle*
+    Toggle unified/split layout while retaining source position.
+
+:RillFocus                                                   *:RillFocus*
+    Focus the current file, or return to the continuous stream.
+
+:RillRefresh                                                 *:RillRefresh*
+    Reload the comparison from Git. Worktree updates are not watched.
+
+==============================================================================
+REVIEW KEYS                                                 *rill-keys*
+
+All mappings below are local to Rill buffers.
+
+    <Tab>       Toggle unified / split
+    gf          Focus file / return to stream
+    <CR>        Open source, expand gap, or select tree entry
+    ]f / [f     Next / previous file
+    ]c / [c     Next / previous hunk
+    zo / zB     Reveal context from the top / bottom of the current gap
+    zO          Reveal the entire gap
+    zR          Reveal the entire current file
+    zM          Collapse current file's unchanged context
+    za          Collapse / expand the current file body
+    gT          Show / hide the file tree
+    gw          Toggle unified wrapping (split remains unwrapped)
+    gr          Refresh comparison
+    g?          Show key help
+    q           Close review
+
+Context expansion is per file and survives switching layout/focus. Expanding a
+file in the stream pushes later files down. On a code row, expansion finds the
+next gap in the same file; on a gap, it acts on that gap. context_step controls
+the number of lines revealed by zo, zB, and Enter on a gap.
+
+Enter opens worktree code in the originating window at its source line. Old,
+index, and historical code opens a read-only source snapshot. Selecting a file
+in the sidebar jumps to it in the stream, or switches the focused file.
+
+Source text is ordinary buffer text. Normal motions, character/line/block visual
+selection, / and ? search, and yanking work on materialized rows. Gutter source
+numbers and change signs are decorations, not part of the copied code. Hidden
+context is not searched until expanded. Actual buffer rows differ from source
+line numbers; integrations must use |rill-context|.
+
+==============================================================================
+CONFIGURATION                                               *rill-setup*
+
+With a local checkout and lazy.nvim: >lua
+
+    {
+      name = "rill.nvim",
+      dir = vim.fn.expand("~/code/side-projects/rill.nvim"),
+      main = "rill",
+      cmd = { "Rill", "RillClose", "RillToggle", "RillFocus", "RillRefresh" },
+      opts = {},
+    }
+<
+Defaults: >lua
+
+    require("rill").setup({
+      layout = "unified",                 -- "unified" or "split"
+      tree_width = 30,
+      context_step = 20,
+      wrap = false,                       -- unified only
+      syntax = true,                      -- installed Tree-sitter parsers
+      syntax_max_lines = 3000,
+      syntax_max_bytes = 256 * 1024,
+      sidekick = true,                    -- optional buffer-local bindings
+      max_file_bytes = 1024 * 1024,        -- source and per-file patch bytes
+      max_changed_lines = 20000,          -- additions + deletions per file
+      max_patch_bytes = 16 * 1024 * 1024,  -- retained patches in one review
+      source_cache_bytes = 32 * 1024 * 1024,
+    })
+<
+Additional Git options accepted by open/setup include max_source_lines (100000),
+max_metadata_bytes (16 MiB), and timeout (30000 milliseconds).
+
+Diff colors follow the active colorscheme. Public highlight groups:
+
+    RillAdd          RillDelete          RillAddText      RillDeleteText
+    RillAddSign      RillDeleteSign      RillHeader       RillGap
+    RillMuted        RillNumber          RillPadding      RillTreeCurrent
+
+Rill regenerates them when a review first opens and on ColorScheme. Source syntax
+uses installed Tree-sitter capture groups, e.g. @keyword.lua.
+
+==============================================================================
+LUA API                                                     *rill-api*
+
+Open functions return a session immediately. Git/source/highlight work completes
+asynchronously; the session owns cancellation and scratch-window cleanup. >lua
+
+    local rill = require("rill")
+    rill.open({ mode = "working", cwd = "/path/to/repository" })
+    rill.open_working(opts)
+    rill.open_staged(opts)
+    rill.open_unstaged(opts)
+    rill.open_branch({ base = "origin/main" })
+    rill.open_commit("HEAD~1", opts)
+    rill.open_range("main", "HEAD", { paths = { "src" }, layout = "split" })
+<
+All opts tables are optional. Common fields:
+
+    cwd          Working directory used to locate the Git repository
+    layout       "unified" or "split"
+    paths        Array of literal repository-relative file/directory paths
+    base         Base revision for branch/range
+    head         Head revision for branch/range, default HEAD
+    merge_base   true to compare from a merge base; branch defaults true
+
+open_commit() defaults its revision to HEAD. open_range(base, head, opts) requires
+base; head defaults to HEAD. Direct ranges compare snapshots, not a commit list.
+Setup options can be overridden per open call.
+
+    rill.current()   Current tab's session, or nil
+    rill.toggle()    Toggle layout in current review
+    rill.focus()     Toggle focused file in current review
+    rill.refresh()   Reload current comparison
+    rill.close()     Close current review
+
+The session object's internal fields are not an integration API. Use context()
+for source locations and the public functions above for review actions.
+
+==============================================================================
+INTEGRATION CONTEXT                                          *rill-context*
+
+Never interpret scratch-buffer row numbers as source line numbers. Capture the
+buffer position while the user is still in the review, then resolve it: >lua
+
+    local win = vim.api.nvim_get_current_win()
+    local cursor = vim.api.nvim_win_get_cursor(win)
+    local context = require("rill").context({
+      buf = vim.api.nvim_win_get_buf(win),
+      win = win,
+      row = cursor[1],       -- 1-based
+      col = cursor[2] + 1,   -- 1-based byte column
+    })
+<
+An optional range describes a captured visual selection:
+
+    range = {
+      from = { row, column },
+      to = { row, column },
+      kind = "line" | "char" | "block",
+    }
+
+Range rows are 1-based; range columns are 0-based byte positions with inclusive
+endpoints, as in Sidekick's context object. Without a range, context resolves
+the current source line. The result is nil outside a loaded Rill buffer:
+
+    {
+      root = "/absolute/repository/root",
+      file = file_metadata,
+      spans = {
+        {
+          path = "src/file.lua",
+          absolute_path = "/absolute/repository/root/src/file.lua",
+          side = "old" | "new",
+          revision = "commit hash or endpoint label",
+          start_line = 143,
+          end_line = 145,
+          start_col = 0,
+          end_col = 12,
+          lines = { "exact", "selected", "text" },
+        },
+      },
+    }
+
+Returned source line numbers are 1-based and inclusive. Returned columns are
+0-based bytes with an EXCLUSIVE end column. Each lines array is the selected
+text, including partial lines; it is a snapshot, not a live buffer reference.
+
+Unified deletions use old coordinates; additions and unchanged context use new
+coordinates. Split uses the selected pane's side. Renames use the corresponding
+old or new path. Mixed sides, files, gaps, and discontinuities produce separate
+spans. Tree/file headers can return a file with no spans; gaps and padding never
+supply invented source lines. Resolve before opening another window or refreshing
+the review, then retain the resulting snapshot for asynchronous work.
+
+==============================================================================
+SIDEKICK                                                    *rill-sidekick*
+
+Sidekick integration is optional and loaded on invocation. It uses custom context
+templates through Sidekick's existing send/comment flow; no Sidekick core edits
+or transport changes are required. The comment action requires send_with_comment,
+available in the shadowfax-sidekick.nvim fork.
+
+    <leader>ai / aI   Comment with relative / absolute paths
+    <leader>al / aL   Send source lines with relative / absolute paths
+    <leader>af / aF   Send file paths only
+    <leader>at        Send current source line / selection
+    <leader>av        Send to Claude, focus=false
+    <leader>ax        Send to Codex, focus=false
+
+These mappings work in normal and visual modes and remain local to Rill buffers.
+Set sidekick=false to omit them. Existing Sidekick routing and multicast settings
+still apply.
+
+Line messages contain source paths, line ranges, side/revision labels, and fenced
+selected text. File messages contain paths only. A mixed selection produces
+separate code blocks. Context is captured before opening the comment popup, so
+preview, saved draft, and delivered message retain the same source snapshot.
+
+The adapter can also be called directly: >lua
+
+    require("rill.sidekick").send({
+      comment = true,
+      absolute = false,
+      kind = "line", -- or "file"
+      filter = { name = "codex" },
+      focus = false,
+    })
+    local text = require("rill.sidekick").format(context, {
+      absolute = true,
+      kind = "line",
+    })
+<
+==============================================================================
+LIMITS AND OWNERSHIP                                         *rill-limits*
+
+Rill is a Git review surface. It does not stage changes, edit the review text,
+resolve merge conflicts, or store persistent review threads. Enter opens source
+for editing where the selected endpoint is a real worktree file.
+
+Binary files, submodules, file-type changes, unmerged paths, and oversized changes
+remain listed with explanatory placeholders. Generated files follow the same
+size limits as any other file. There is no binary or combined-merge renderer.
+
+Git processes and source reads are asynchronous and cancellable. Patch capture
+is bounded by per-file and total budgets. Full source is loaded on demand, with
+worktree snapshots validated against the displayed patch before expansion.
+Refresh or close invalidates obsolete asynchronous results.
+
+Syntax belongs to complete old/new sources rather than patch fragments. Captures
+are cached by source coordinates and painted only for visible review rows.
+Normalization and capture indexing use cooperative batches (4ms/256-item budget).
+Missing parsers produce plain text. Syntax skips sources over 3000 lines or
+256 KiB by default and caps capture spans at 100000 per side. Intraline highlighting skips
+paired lines over 1000 bytes. These syntax limits are independent of Git limits.
+Increasing syntax_max_lines/bytes permits more full-source highlighting but can
+delay input during Neovim's native parsing. Diff and intraline colors remain
+available when full syntax is skipped.
+
+source_cache_bytes is a target for retained source/highlight data. Visible files
+and files explicitly expanded by the user can remain pinned above the target;
+it is not a hard ceiling on Neovim's total memory.
+
+Use gr after editing source. Ordinary search visits only materialized rows;
+expand context with zR to search the whole current file, within source limits.
+
+==============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
