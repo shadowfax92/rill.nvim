@@ -24,6 +24,8 @@ Public `require('rill').context(ctx)` resolves Sidekick's captured `{buf,win,row
 
 Review backgrounds use a small theme-derived tint; source text has no intraline overlays or character-diff workers. Comment captures reference Rill-owned copies of their theme groups. Preparing each copy outside redraw preserves its styles and adjusts only insufficient foreground contrast against the context/add/delete palette (4.5:1 target). A registry keyed by source capture name rebuilds these stable copies on ColorScheme, so existing cached captures stay valid and normal source buffers keep their theme colors.
 
+Filetype detection first tries each snapshot's filename. Ambiguous names such as `.ts` need a temporary, unlisted buffer containing that side's bounded source: on Neovim 0.11, the extension detector reads buffer lines even when `contents` is supplied to `vim.filetype.match`. Detection never opens the working file or sets a buffer filetype, and wipes its temporary buffer on success or failure before starting the string parser.
+
 `bar.render` builds a width-aware winbar with key/action labels. Split windows share the legend, and narrow panes discard comparison text before actions. Tab/Shift-Tab cycle the actual comparison file list in both stream and focus; `gs` changes layout.
 
 ## Verification

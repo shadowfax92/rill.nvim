@@ -26,8 +26,8 @@ end
 local function fake_parsers(query, use)
   local original_parser, original_query = vim.treesitter.get_string_parser, vim.treesitter.query.get
   local parsers = {}
-  vim.treesitter.get_string_parser = function()
-    local parser = { destroyed = 0 }
+  vim.treesitter.get_string_parser = function(source, lang)
+    local parser = { destroyed = 0, source = source, lang = lang }
     function parser:parse(_, callback)
       callback()
     end
@@ -41,7 +41,7 @@ local function fake_parsers(query, use)
         end,
       }, {
         lang = function()
-          return "lua"
+          return lang
         end,
       })
     end
@@ -61,6 +61,66 @@ local function fake_parsers(query, use)
 end
 
 return {
+  ambiguous_extensions_use_each_snapshot_contents_without_leaking_buffers = function()
+    local buffers = vim.api.nvim_list_bufs()
+    local current = vim.api.nvim_get_current_buf()
+    local file = {
+      meta = { path = "same.ts", old_path = "same.ts" },
+      old_source = { '<?xml version="1.0"?>', '<TS version="2.1"></TS>' },
+      new_source = { "export const answer = 42;" },
+    }
+    -- Keep Neovim's real filetype detector. Parser stubs make the regression
+    -- independent of optional TypeScript/XML parser installations in CI.
+    fake_parsers({
+      captures = { "keyword" },
+      iter_captures = function()
+        local emitted = false
+        return function()
+          if not emitted then
+            emitted = true
+            return 1, {}, { [1] = { range = { 0, 0, 0, 6 } } }
+          end
+        end
+      end,
+    }, function(parsers)
+      await(Highlight.syntax, file)
+      H.eq(2, #parsers, "both .ts snapshots must reach their parser")
+      H.eq("xml", parsers[1].lang, "old .ts snapshot is Qt XML")
+      H.eq("typescript", parsers[2].lang, "new .ts snapshot is TypeScript")
+      H.eq({ { 0, 6, "@keyword.typescript", 100 } }, file.syntax.new[1])
+      H.eq(1, parsers[1].destroyed)
+      H.eq(1, parsers[2].destroyed)
+    end)
+    H.eq(current, vim.api.nvim_get_current_buf(), "detection must not switch buffers")
+    H.eq(buffers, vim.api.nvim_list_bufs(), "temporary detection buffers must be wiped")
+  end,
+
+  failed_content_detection_cleans_up_and_settles_as_plain_text = function()
+    local original_match = vim.filetype.match
+    local detected_buffers = {}
+    vim.filetype.match = function(args)
+      if args.buf then
+        detected_buffers[#detected_buffers + 1] = args.buf
+        error("fixture content detector failed")
+      end
+      return original_match(args)
+    end
+    local ok, err = xpcall(function()
+      local file = changed("export const a = 1;", "export const a = 2;")
+      file.meta.path = "fixture.ts"
+      await(Highlight.syntax, file)
+      H.eq(2, #detected_buffers)
+      for _, buf in ipairs(detected_buffers) do
+        H.eq(false, vim.api.nvim_buf_is_valid(buf), "failed detector leaked its buffer")
+      end
+      H.eq({ old = {}, new = {} }, file.syntax)
+    end, debug.traceback)
+    vim.filetype.match = original_match
+    if not ok then
+      error(err)
+    end
+  end,
+
   real_lua_parser_uses_complete_sources_and_releases_trees = function()
     local file = {
       meta = { path = "sample.lua" },
