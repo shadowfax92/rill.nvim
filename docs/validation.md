@@ -29,8 +29,10 @@ headless materialization and event-loop responsiveness, not terminal pixel paint
 | One 10,000-line file, 100 replacements | ~36 ms | ~11 ms median with the full file expanded | 12–27 ms |
 
 The largest observed event-loop heartbeat gap was 21.4 ms. Full syntax is skipped
-for the 10,000-line source under the initial 3,000-line/256 KiB limit; diff and
-intraline colors remain available. Capture workers cross real timer turns.
+for the 10,000-line source under the initial 3,000-line/256 KiB limit; at that
+time both line and intraline colors remained available. Intraline computation
+and painting were subsequently removed for readability. Capture workers cross
+real timer turns.
 
 These fixtures establish an initial baseline, not a latency guarantee for every
 repository, grammar, filesystem or terminal. Projection still materializes the
@@ -42,3 +44,13 @@ The earlier syntax-enabled timings above therefore describe the initial cutoff,
 not full parsing of the 10,000-line fixture. The attached-terminal regression now
 checks actual RGB backgrounds, full-width header bands, and delayed syntax paint;
 it fails on the original ephemeral line highlighting and ordinary-redraw paths.
+
+## Readability regression
+
+The attached-terminal regression uses dim comments from a Gruvbox Baby-like
+palette and inspects actual rendered cells. Before the fix it failed on
+character-level background patches; after removing those overlays it failed on
+comment contrast. It now checks uniform changed-line backgrounds, comments at
+least 4.5:1 against those backgrounds, preserved comment styles, unchanged global
+capture groups, and visible delayed syntax. It repeats across unified/split
+layouts and a live dark-to-light ColorScheme change, reusing cached captures.

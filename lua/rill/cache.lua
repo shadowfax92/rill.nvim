@@ -23,7 +23,7 @@ local function pinned(file, protected)
   if expanded(file) or file.pending_expansion or file.source_waiters then
     return true
   end
-  if file.syntax_loading or file.words_loading then
+  if file.syntax_loading then
     return true
   end
   for _, job in pairs(file._highlight_jobs or {}) do
@@ -102,7 +102,7 @@ local function evict(file)
     -- the worktree again, and model.hydrate rejects changes against the patch.
     file.meta._new_source = nil
   end
-  -- Do not dispose the file: hunks, word spans, source addresses, and future
+  -- Do not dispose the file: hunks, source addresses, and future
   -- highlighting remain valid. Active jobs were pinned before reaching here.
 end
 

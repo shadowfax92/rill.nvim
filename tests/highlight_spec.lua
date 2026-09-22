@@ -1,6 +1,5 @@
 local H = require("tests.helpers")
 local Highlight = require("rill.highlight")
-local Model = require("rill.model")
 
 local function await(method, file)
   local complete, failure = false, nil
@@ -17,10 +16,11 @@ local function await(method, file)
 end
 
 local function changed(old, new)
-  return Model.parse({
-    path = "sample.lua",
-    patch = "@@ -143 +143 @@\n-" .. old .. "\n+" .. new .. "\n",
-  })
+  return {
+    meta = { path = "sample.lua" },
+    old_source = { old },
+    new_source = { new },
+  }
 end
 
 local function fake_parsers(query, use)
@@ -61,21 +61,6 @@ local function fake_parsers(query, use)
 end
 
 return {
-  word_ranges_follow_utf8_bytes_and_ignore_crlf = function()
-    local file = changed('print("café")\r', 'print("caffè")\r')
-    await(Highlight.words, file)
-    H.eq({ { 10, 12 } }, file.words.old[143])
-    H.eq({ { 10, 13 } }, file.words.new[143])
-    local empty = changed("", "é")
-    await(Highlight.words, empty)
-    H.eq({}, empty.words.old[143])
-    H.eq({ { 0, 2 } }, empty.words.new[143])
-    local long = changed(string.rep("a", 1001), "short")
-    await(Highlight.words, long)
-    H.eq({}, long.words.old[143])
-    H.eq({}, long.words.new[143])
-  end,
-
   real_lua_parser_uses_complete_sources_and_releases_trees = function()
     local file = {
       meta = { path = "sample.lua" },
@@ -83,7 +68,7 @@ return {
       new_source = { "return 2" },
     }
     await(Highlight.syntax, file)
-    H.eq({ { 0, 12, "@comment.lua", 100 } }, file.syntax.old[3])
+    H.eq({ { 0, 12, "RillComment.lua", 100 } }, file.syntax.old[3])
     H.ok(vim.tbl_contains(file.syntax.old[1], function(span)
       return vim.deep_equal(span, { 6, 11, "@variable.lua", 100 })
     end, { predicate = true }))
@@ -257,12 +242,12 @@ return {
       H.eq(nil, err)
       count = count + 1
     end
-    Highlight.words(file, completed)
-    Highlight.words(file, completed)
+    Highlight.syntax(file, completed)
+    Highlight.syntax(file, completed)
     H.ok(vim.wait(3000, function()
       return count == 2
     end, 5))
-    Highlight.words(file, completed)
+    Highlight.syntax(file, completed)
     H.ok(vim.wait(3000, function()
       return count == 3
     end, 5))
@@ -272,15 +257,15 @@ return {
       H.eq("cancelled", err)
       cancelled = cancelled + 1
     end
-    Highlight.words(abandoned, cancel)
-    Highlight.words(abandoned, cancel)
+    Highlight.syntax(abandoned, cancel)
+    Highlight.syntax(abandoned, cancel)
     Highlight.dispose(abandoned)
-    Highlight.words(abandoned, cancel)
+    Highlight.syntax(abandoned, cancel)
     H.ok(vim.wait(3000, function()
       return cancelled == 3
     end, 5))
-    H.eq(nil, abandoned.words)
-    H.eq(false, abandoned.words_loading)
+    H.eq(nil, abandoned.syntax)
+    H.eq(false, abandoned.syntax_loading)
   end,
 
   disposal_releases_pending_parsers_and_rejects_late_parse_callbacks = function()

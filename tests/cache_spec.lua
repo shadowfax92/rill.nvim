@@ -39,7 +39,6 @@ return {
     policy:touch(first)
     policy:touch(second)
     policy:touch(first)
-    second.words = { durable = "word spans belong to hunks" }
     second.syntax = { old = { [2] = { { 0, 3, "@keyword", 100 } } }, new = {} }
     second.source_error = "stale prior error"
     local old_unified, old_split = addresses(second, "unified"), addresses(second, "split")
@@ -54,7 +53,6 @@ return {
     H.eq(nil, second.source_error)
     H.eq(false, second.hydrated)
     H.eq(nil, second.disposed)
-    H.ok(second.words.durable)
     H.eq(old_unified, addresses(second, "unified"))
     H.eq(old_split, addresses(second, "split"))
     H.ok(model.hydrate(second, old, new), "eviction must permit future hydration")
@@ -84,23 +82,22 @@ return {
   end,
 
   pending_consumers_and_highlight_jobs_prevent_eviction = function()
-    local waiter, expansion, syntax, word, job =
-      fixture("waiter"), fixture("expansion"), fixture("syntax"), fixture("word"), fixture("job")
+    local waiter, expansion, syntax, job =
+      fixture("waiter"), fixture("expansion"), fixture("syntax"), fixture("job")
     waiter.source_waiters = {}
     expansion.pending_expansion = true
     syntax.syntax_loading = true
-    word.words_loading = true
     job._highlight_jobs = { syntax = { active = true } }
-    local files = { waiter, expansion, syntax, word, job }
+    local files = { waiter, expansion, syntax, job }
     local policy = cache.new(0)
     H.eq(0, policy:prune(files).evicted)
     for _, file in ipairs(files) do
       H.ok(file.sources)
     end
     waiter.source_waiters, expansion.pending_expansion = nil, nil
-    syntax.syntax_loading, word.words_loading = false, false
+    syntax.syntax_loading = false
     job._highlight_jobs.syntax.active = false
-    H.eq(5, policy:prune(files).evicted)
+    H.eq(4, policy:prune(files).evicted)
   end,
 
   untracked_capture_is_counted_before_hydration_and_released = function()
