@@ -130,12 +130,17 @@ max_metadata_bytes (16 MiB), and timeout (30000 milliseconds).
 
 Diff colors follow the active colorscheme. Public highlight groups:
 
-    RillAdd          RillDelete          RillAddText      RillDeleteText
-    RillAddSign      RillDeleteSign      RillHeader       RillGap
-    RillMuted        RillNumber          RillPadding      RillTreeCurrent
+    RillAdd          RillDelete          RillAddSign      RillDeleteSign
+    RillHeader       RillGap             RillMuted        RillNumber
+    RillPadding      RillTreeCurrent
 
 Rill regenerates them when a review first opens and on ColorScheme. Source syntax
-uses installed Tree-sitter capture groups, e.g. @keyword.lua.
+uses installed Tree-sitter capture groups, e.g. @keyword.lua. Diffs use subtle
+full-line tints and stronger gutter signs, without character-level highlighting.
+Comment captures use Rill-owned copies (RillComment.*) that preserve theme styles
+and raise insufficient foreground contrast toward 4.5:1 across context/add/delete
+backgrounds. Source-buffer highlights are never modified. Both layouts share this
+styling; cached comment copies update on ColorScheme without reparsing files.
 
 ==============================================================================
 LUA API                                                     *rill-api*

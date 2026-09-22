@@ -17,6 +17,52 @@ local function mix(a, b, amount)
   return value
 end
 
+local function luminance(rgb)
+  local total = 0
+  for i, weight in ipairs({ 0.2126, 0.7152, 0.0722 }) do
+    local channel = math.floor(rgb / 2 ^ ((3 - i) * 8)) % 256 / 255
+    total = total + weight * (channel <= 0.04045 and channel / 12.92 or ((channel + 0.055) / 1.055) ^ 2.4)
+  end
+  return total
+end
+
+-- Only Rill's capture copies use this palette. Keeping stable group names lets
+-- ColorScheme refresh already-cached syntax without reparsing files or changing
+-- the user's source-buffer highlights. Groups are prepared outside redraw.
+local comment_groups, backgrounds = {}, nil
+
+local function comment_color(fg)
+  local function contrast(value)
+    local light, minimum = luminance(value), math.huge
+    for _, bg in ipairs(backgrounds) do
+      minimum = math.min(minimum, (math.max(light, bg) + 0.05) / (math.min(light, bg) + 0.05))
+    end
+    return minimum
+  end
+  if contrast(fg) >= 4.5 then
+    return fg
+  end
+  -- Move dim comments toward the readable pole on either dark or light themes.
+  -- Check context and both diff backgrounds so crossing a hunk cannot hide text.
+  local target = contrast(0xffffff) >= contrast(0) and 0xffffff or 0
+  local low, high = 0, 1
+  for _ = 1, 12 do
+    local middle = (low + high) / 2
+    if contrast(mix(fg, target, middle)) >= 4.5 then
+      high = middle
+    else
+      low = middle
+    end
+  end
+  return mix(fg, target, high)
+end
+
+local function update_comment(source, group)
+  local attrs = vim.api.nvim_get_hl(0, { name = source, link = false })
+  attrs.fg = comment_color(attrs.fg or color("Comment", "fg", 0x928374))
+  vim.api.nvim_set_hl(0, group, attrs)
+end
+
 function M.colors()
   local bg = color("Normal", "bg", vim.o.background == "light" and 0xfaf9f5 or 0x242424)
   local fg = color("Normal", "fg", 0xd4c7aa)
@@ -24,10 +70,9 @@ function M.colors()
   local add = color("DiagnosticOk", "fg", 0x8cab70)
   local del = color("DiagnosticError", "fg", 0xe27878)
   local defs = {
-    RillAdd = { bg = mix(bg, add, 0.13) },
-    RillDelete = { bg = mix(bg, del, 0.13) },
-    RillAddText = { bg = mix(bg, add, 0.32), bold = true },
-    RillDeleteText = { bg = mix(bg, del, 0.32), bold = true },
+    -- Gutters carry the stronger color; a small wash preserves syntax contrast.
+    RillAdd = { bg = mix(bg, add, 0.05) },
+    RillDelete = { bg = mix(bg, del, 0.05) },
     RillAddSign = { fg = add },
     RillDeleteSign = { fg = del },
     RillHeader = { fg = fg, bg = mix(bg, fg, 0.12), bold = true },
@@ -42,6 +87,26 @@ function M.colors()
   for name, attrs in pairs(defs) do
     vim.api.nvim_set_hl(0, name, attrs)
   end
+  backgrounds = { luminance(bg), luminance(defs.RillAdd.bg), luminance(defs.RillDelete.bg) }
+  for source, group in pairs(comment_groups) do
+    update_comment(source, group)
+  end
+end
+
+local function capture_group(name, lang)
+  local source = "@" .. name .. "." .. lang
+  if name ~= "comment" and name:sub(1, 8) ~= "comment." then
+    return source
+  end
+  if not comment_groups[source] then
+    if not backgrounds then
+      M.colors()
+    end
+    local group = "RillComment" .. source:sub(9)
+    comment_groups[source] = group
+    update_comment(source, group)
+  end
+  return comment_groups[source]
 end
 
 -- Jobs coalesce callers and settle callbacks even when decoration is unavailable.
@@ -132,80 +197,6 @@ local function batched(job, work, finished)
   vim.schedule(step)
 end
 
--- Character diffs are bounded, and offsets are converted back to bytes before
--- reaching extmarks. A UTF-8 character must never be cut at a continuation byte.
-local function characters(text)
-  local parts = vim.fn.split(text, "\\zs")
-  local offsets = { 0 }
-  for _, part in ipairs(parts) do
-    offsets[#offsets + 1] = offsets[#offsets] + #part
-  end
-  -- An empty string must stay empty: a synthetic blank character would produce
-  -- an invalid offset for a replacement between empty and nonempty source lines.
-  return #parts > 0 and table.concat(parts, "\n") .. "\n" or "", offsets
-end
-
-local function word_ranges(old, new)
-  if old == new or #old > 1000 or #new > 1000 then
-    return {}, {}
-  end
-  local a, ao = characters(old)
-  local b, bo = characters(new)
-  local ok, changes = pcall(vim.diff, a, b, { result_type = "indices", algorithm = "histogram" })
-  if not ok then
-    return {}, {}
-  end
-  local left, right = {}, {}
-  for _, hunk in ipairs(changes) do
-    if hunk[2] > 0 then
-      left[#left + 1] = { ao[hunk[1]], ao[hunk[1] + hunk[2]] }
-    end
-    if hunk[4] > 0 then
-      right[#right + 1] = { bo[hunk[3]], bo[hunk[3] + hunk[4]] }
-    end
-  end
-  return left, right
-end
-
-function M.words(file, done)
-  local job = begin(file, "words", done)
-  if not job then
-    return
-  end
-  batched(job, function(checkpoint)
-    local marks = { old = {}, new = {} }
-    -- Match the split projection's ordinal pairing within each changed run,
-    -- without materializing expanded context or another complete review layout.
-    for _, hunk in ipairs(file.hunks or {}) do
-      local old, new = {}, {}
-      local function flush()
-        for i = 1, math.min(#old, #new) do
-          marks.old[old[i].line], marks.new[new[i].line] = word_ranges(old[i].text, new[i].text)
-          checkpoint()
-        end
-        old, new = {}, {}
-      end
-      for _, row in ipairs(hunk.rows) do
-        if row.change == "context" then
-          flush()
-        else
-          if row.old then
-            old[#old + 1] = row.old
-          end
-          if row.new then
-            new[#new + 1] = row.new
-          end
-        end
-        checkpoint()
-      end
-      flush()
-    end
-    return marks
-  end, function(marks)
-    job.finish(nil, marks or { old = {}, new = {} })
-  end)
-end
-
 -- Default syntax coverage matches readable Git sources. Capture indexing stays
 -- cooperative; Neovim's native parse can still take longer on large files. Users
 -- who prefer stricter latency can lower these limits without changing Git reads.
@@ -258,7 +249,7 @@ local function captures(parser, source, lines, checkpoint)
               return
             end
             local spans = marks[row + 1] or {}
-            spans[#spans + 1] = { first, last, "@" .. name .. "." .. lang, priority }
+            spans[#spans + 1] = { first, last, capture_group(name, lang), priority }
             marks[row + 1] = spans
           end
           checkpoint()
@@ -364,8 +355,8 @@ function M.dispose(file)
       parser:destroy()
     end)
   end
-  file.parsers, file.syntax, file.words = nil, nil, nil
-  file.syntax_loading, file.words_loading = false, false
+  file.parsers, file.syntax = nil, nil
+  file.syntax_loading = false
 end
 
 return M

@@ -194,17 +194,6 @@ local function initialize()
             })
           end
         end
-        local words = row.file.words and row.file.words[side][cell.line] or {}
-        for _, span in ipairs(words) do
-          if span[1] and span[2] and span[2] > span[1] and span[1] < #cell.text then
-            api.nvim_buf_set_extmark(buf, ns, line, span[1], {
-              end_col = math.min(span[2], #cell.text),
-              hl_group = side == "old" and "RillDeleteText" or "RillAddText",
-              priority = 200,
-              ephemeral = true,
-            })
-          end
-        end
       end
     end,
   })
@@ -771,7 +760,6 @@ function Session:queue_visible()
             self:prune_cache()
           end
         end
-        require("rill.highlight").words(file, redraw)
         if self.opts.syntax ~= false then
           local hydrated = file.hydrated
           self:ensure_source(file, function(err)

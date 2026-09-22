@@ -94,6 +94,12 @@ an empty-tree baseline where applicable.
 | `g?` | Show key help |
 | `q` | Close the review |
 
+Diffs use a subtle full-line tint with stronger `+` / `−` gutters. Code keeps its
+syntax colors without character-level patches or extra bolding. Dim comments use
+Rill-only highlight copies targeting 4.5:1 contrast against unchanged, added, and
+deleted lines; your theme's source-buffer highlights remain unchanged. Both
+layouts share this styling, which updates when you change colorschemes.
+
 Each file owns its context expansion. Expanding a file in the stream moves later
 files down; focusing it preserves that expansion. Split mode remains unwrapped
 so paired rows stay aligned.
@@ -180,8 +186,7 @@ file, and retained patches to 16 MiB per review. Full-source reads also have a
 large readable file can finish highlighting instead of stopping at a separate
 small-file cutoff. Captures repaint as soon as indexing completes. Lower
 `syntax_max_lines` / `syntax_max_bytes` if you prefer stricter parser latency.
-Syntax caps captures at 100,000 per side; intraline highlighting skips paired
-lines longer than 1,000 bytes.
+Syntax caps captures at 100,000 per side.
 
 Binary files, submodules, file-type changes, unresolved conflicts, and oversized
 changes remain visible as explanatory entries. Large generated files receive
