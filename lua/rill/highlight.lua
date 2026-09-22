@@ -261,6 +261,23 @@ local function captures(parser, source, lines, checkpoint)
   return exhausted and {} or marks
 end
 
+local function detect_snapshot_type(path, lines)
+  -- Ambiguous extensions (notably .ts: TypeScript or Qt XML) use detectors
+  -- that read buffer lines on Neovim 0.11; filename + contents is insufficient.
+  -- This unnamed, unlisted buffer exists only during detection. Never read the
+  -- worktree or set filetype: either could use the wrong revision or start LSPs.
+  local buf
+  local ok, ft = pcall(function()
+    buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    return vim.filetype.match({ filename = path, buf = buf })
+  end)
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end
+  return ok and ft or nil
+end
+
 function M.syntax(file, done)
   local job = begin(file, "syntax", done)
   if not job then
@@ -284,11 +301,10 @@ function M.syntax(file, done)
   for _, side in ipairs({ "old", "new" }) do
     -- A rename can also change language. Each side is parsed as its own filename
     -- and full source, never as the concatenated synthetic diff document.
-    local path = side == "old" and file.meta.old_path or file.meta.path
-    local ft = vim.filetype.match({ filename = path or file.meta.path })
-    local lang = ft and vim.treesitter.language.get_lang(ft)
+    local path = (side == "old" and file.meta.old_path) or file.meta.path
+    local ft = vim.filetype.match({ filename = path })
     local original = file[side .. "_source"] or {}
-    if not lang or #original == 0 or #original > max_lines then
+    if #original == 0 or #original > max_lines then
       finished(side)
     else
       batched(job, function(checkpoint)
@@ -304,6 +320,14 @@ function M.syntax(file, done)
         return { source = table.concat(normalized, "\n"), lines = normalized }
       end, function(prepared)
         if not prepared then
+          finished(side)
+          return
+        end
+        -- Source budgets are enforced before materializing a detection buffer.
+        -- Most extensions resolve by name and keep the buffer-free fast path.
+        ft = ft or detect_snapshot_type(path, prepared.lines)
+        local lang = ft and vim.treesitter.language.get_lang(ft)
+        if not lang then
           finished(side)
           return
         end
