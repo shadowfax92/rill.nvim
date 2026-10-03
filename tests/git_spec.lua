@@ -42,9 +42,12 @@ local function load_error(root, opts)
   Git.load(vim.tbl_extend("force", { cwd = root }, opts or {}), function(e, value)
     err, result, done = e, value, true
   end)
-  assert(vim.wait(10000, function()
-    return done
-  end, 10), "async operation timed out")
+  assert(
+    vim.wait(10000, function()
+      return done
+    end, 10),
+    "async operation timed out"
+  )
   assert(result == nil, "expected the load to fail")
   return tostring(err)
 end
@@ -87,11 +90,15 @@ return {
       local second = H.commit(root, "second adds b")
       H.write(root, "c", { "three" })
       local third = H.commit(root, "third adds c")
-      local snapshot = commits(root, { { rev = third }, { rev = first }, { rev = "HEAD~1" }, { rev = "HEAD" } })
+      local snapshot =
+        commits(root, { { rev = third }, { rev = first }, { rev = "HEAD~1" }, { rev = "HEAD" } })
       H.eq("3 commits", snapshot.label)
-      H.eq({ third, first, second }, vim.tbl_map(function(group)
-        return group.oid
-      end, snapshot.groups))
+      H.eq(
+        { third, first, second },
+        vim.tbl_map(function(group)
+          return group.oid
+        end, snapshot.groups)
+      )
       local group = snapshot.groups[1]
       H.eq(1, group.index)
       H.eq(third:sub(1, 8), group.short)
@@ -281,12 +288,18 @@ return {
         return job
       end
       local ok, err = pcall(function()
-        cancel = Git.load({ cwd = root, mode = "commits", commits = { "HEAD~2", "HEAD~1", "HEAD" } }, function()
-          called = true
-        end)
-        H.ok(vim.wait(5000, function()
-          return exited ~= nil
-        end, 10), "the stalled diff was never killed")
+        cancel = Git.load(
+          { cwd = root, mode = "commits", commits = { "HEAD~2", "HEAD~1", "HEAD" } },
+          function()
+            called = true
+          end
+        )
+        H.ok(
+          vim.wait(5000, function()
+            return exited ~= nil
+          end, 10),
+          "the stalled diff was never killed"
+        )
         local after_cancel = spawned
         vim.wait(200, function()
           return false

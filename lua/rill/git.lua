@@ -429,9 +429,6 @@ end
 
 local function endpoints(owner, root, options, done)
   local mode = options.mode
-  local function empty(callback)
-    empty_tree(owner, root, options, callback)
-  end
   local function head_or_empty(callback)
     resolve(owner, root, "HEAD", options, function(err, oid)
       if oid then
@@ -443,7 +440,7 @@ local function endpoints(owner, root, options, done)
           if sym_err then
             callback(err)
           else
-            empty(callback)
+            empty_tree(owner, root, options, callback)
           end
         end)
       end
@@ -486,7 +483,7 @@ local function endpoints(owner, root, options, done)
               -- Inclusive ranges beginning at a root commit have an empty-tree
               -- base. Compute it for this repository's hash algorithm, without
               -- writing a Git object or treating arbitrary invalid refs as empty.
-              empty(function(empty_err, left)
+              empty_tree(owner, root, options, function(empty_err, left)
                 if not empty_err and base == left.rev then
                   done(nil, left, endpoint("commit", head_oid, head))
                 else
