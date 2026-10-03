@@ -54,3 +54,13 @@ comment contrast. It now checks uniform changed-line backgrounds, comments at
 least 4.5:1 against those backgrounds, preserved comment styles, unchanged global
 capture groups, and visible delayed syntax. It repeats across unified/split
 layouts and a live dark-to-light ColorScheme change, reusing cached captures.
+
+## Band regression
+
+The faded 5% theme tint was replaced with the Claude Code/delta band palette.
+The same regression now expects those exact bands in both themes and inspects
+every gutter cell of a changed row: the band must continue through the numbers
+and sign, which stay at least 4.5:1 against it. Before the change it failed on
+the faded line tint; removing only the gutter contrast adjustment fails the
+light theme (#fb4934 on #ffe0e0 is 2.8:1). A second case wraps a long added line
+and fails unless its continuation rows keep the band in the gutter.

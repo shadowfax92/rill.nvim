@@ -128,19 +128,24 @@ Defaults: >lua
 Additional Git options accepted by open/setup include max_source_lines (100000),
 max_metadata_bytes (16 MiB), and timeout (30000 milliseconds).
 
-Diff colors follow the active colorscheme. Public highlight groups:
+Colors follow the active colorscheme, except the changed-line bands below.
+Public highlight groups:
 
     RillAdd          RillDelete          RillAddSign      RillDeleteSign
     RillHeader       RillGap             RillMuted        RillNumber
     RillPadding      RillTreeCurrent
 
 Rill regenerates them when a review first opens and on ColorScheme. Source syntax
-uses installed Tree-sitter capture groups, e.g. @keyword.lua. Diffs use subtle
-full-line tints and stronger gutter signs, without character-level highlighting.
-Comment captures use Rill-owned copies (RillComment.*) that preserve theme styles
-and raise insufficient foreground contrast toward 4.5:1 across context/add/delete
-backgrounds. Source-buffer highlights are never modified. Both layouts share this
-styling; cached comment copies update on ColorScheme without reparsing files.
+uses installed Tree-sitter capture groups, e.g. @keyword.lua. Changed lines use
+fixed deep bands, without character-level highlighting: #022800 added and
+#3d0101 deleted on dark backgrounds, #d0ffd0 and #ffe0e0 on light ones. Each
+band continues through the gutter, including wrapped rows. Gutter numbers and
+signs keep DiagnosticOk/DiagnosticError colors, raised toward 4.5:1 contrast on
+their band when needed. Comment captures use Rill-owned copies (RillComment.*)
+that preserve theme styles and raise insufficient foreground contrast toward
+4.5:1 across context/add/delete backgrounds. Source-buffer highlights are never
+modified. Both layouts share this styling; cached comment copies update on
+ColorScheme without reparsing files.
 
 ==============================================================================
 LUA API                                                     *rill-api*

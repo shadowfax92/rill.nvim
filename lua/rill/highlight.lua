@@ -26,29 +26,29 @@ local function luminance(rgb)
   return total
 end
 
--- Only Rill's capture copies use this palette. Keeping stable group names lets
--- ColorScheme refresh already-cached syntax without reparsing files or changing
--- the user's source-buffer highlights. Groups are prepared outside redraw.
-local comment_groups, backgrounds = {}, nil
+local function contrast(a, b)
+  return (math.max(a, b) + 0.05) / (math.min(a, b) + 0.05)
+end
 
-local function comment_color(fg)
-  local function contrast(value)
+-- Theme foregrounds keep their color unless they fall below 4.5:1 against any
+-- of the given background luminances. Insufficient ones move toward white or
+-- black, whichever contrasts more with all of those backgrounds.
+local function readable(fg, grounds)
+  local function worst(value)
     local light, minimum = luminance(value), math.huge
-    for _, bg in ipairs(backgrounds) do
-      minimum = math.min(minimum, (math.max(light, bg) + 0.05) / (math.min(light, bg) + 0.05))
+    for _, ground in ipairs(grounds) do
+      minimum = math.min(minimum, contrast(light, ground))
     end
     return minimum
   end
-  if contrast(fg) >= 4.5 then
+  if worst(fg) >= 4.5 then
     return fg
   end
-  -- Move dim comments toward the readable pole on either dark or light themes.
-  -- Check context and both diff backgrounds so crossing a hunk cannot hide text.
-  local target = contrast(0xffffff) >= contrast(0) and 0xffffff or 0
+  local target = worst(0xffffff) >= worst(0) and 0xffffff or 0
   local low, high = 0, 1
   for _ = 1, 12 do
     local middle = (low + high) / 2
-    if contrast(mix(fg, target, middle)) >= 4.5 then
+    if worst(mix(fg, target, middle)) >= 4.5 then
       high = middle
     else
       low = middle
@@ -57,24 +57,43 @@ local function comment_color(fg)
   return mix(fg, target, high)
 end
 
+-- Only Rill's capture copies use this palette. Keeping stable group names lets
+-- ColorScheme refresh already-cached syntax without reparsing files or changing
+-- the user's source-buffer highlights. Groups are prepared outside redraw.
+local comment_groups, backgrounds = {}, nil
+
 local function update_comment(source, group)
   local attrs = vim.api.nvim_get_hl(0, { name = source, link = false })
-  attrs.fg = comment_color(attrs.fg or color("Comment", "fg", 0x928374))
+  -- Check context and both diff backgrounds so crossing a hunk cannot hide text.
+  attrs.fg = readable(attrs.fg or color("Comment", "fg", 0x928374), backgrounds)
   vim.api.nvim_set_hl(0, group, attrs)
 end
+
+-- Changed lines use the deep red/green bands of Claude Code's and delta's diffs
+-- instead of a theme tint: a wash close to the background reads as faded. Their
+-- hue alone marks the change, and their luminance stays near a dark (or light)
+-- background's, so syntax colors keep their contrast without being recolored.
+local BANDS = {
+  dark = { add = 0x022800, delete = 0x3d0101 },
+  light = { add = 0xd0ffd0, delete = 0xffe0e0 },
+}
 
 function M.colors()
   local bg = color("Normal", "bg", vim.o.background == "light" and 0xfaf9f5 or 0x242424)
   local fg = color("Normal", "fg", 0xd4c7aa)
   local muted = color("Comment", "fg", 0x928374)
-  local add = color("DiagnosticOk", "fg", 0x8cab70)
-  local del = color("DiagnosticError", "fg", 0xe27878)
+  -- Choose by the actual background color; 'background' is not always kept in
+  -- sync with Normal.
+  local shade = luminance(bg)
+  local band = contrast(shade, 1) >= contrast(shade, 0) and BANDS.dark or BANDS.light
+  -- Numbers and signs sit inside their band, so they are checked against it.
+  local add = readable(color("DiagnosticOk", "fg", 0x8cab70), { luminance(band.add) })
+  local del = readable(color("DiagnosticError", "fg", 0xe27878), { luminance(band.delete) })
   local defs = {
-    -- Gutters carry the stronger color; a small wash preserves syntax contrast.
-    RillAdd = { bg = mix(bg, add, 0.05) },
-    RillDelete = { bg = mix(bg, del, 0.05) },
-    RillAddSign = { fg = add },
-    RillDeleteSign = { fg = del },
+    RillAdd = { bg = band.add },
+    RillDelete = { bg = band.delete },
+    RillAddSign = { fg = add, bg = band.add },
+    RillDeleteSign = { fg = del, bg = band.delete },
     RillHeader = { fg = fg, bg = mix(bg, fg, 0.12), bold = true },
     RillBarKey = { fg = fg, bg = color("WinBar", "bg", bg), bold = true },
     RillBarHint = { fg = muted, bg = color("WinBar", "bg", bg) },
@@ -87,7 +106,7 @@ function M.colors()
   for name, attrs in pairs(defs) do
     vim.api.nvim_set_hl(0, name, attrs)
   end
-  backgrounds = { luminance(bg), luminance(defs.RillAdd.bg), luminance(defs.RillDelete.bg) }
+  backgrounds = { shade, luminance(band.add), luminance(band.delete) }
   for source, group in pairs(comment_groups) do
     update_comment(source, group)
   end

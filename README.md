@@ -94,11 +94,15 @@ an empty-tree baseline where applicable.
 | `g?` | Show key help |
 | `q` | Close the review |
 
-Diffs use a subtle full-line tint with stronger `+` / `−` gutters. Code keeps its
-syntax colors without character-level patches or extra bolding. Dim comments use
-Rill-only highlight copies targeting 4.5:1 contrast against unchanged, added, and
-deleted lines; your theme's source-buffer highlights remain unchanged. Both
-layouts share this styling, which updates when you change colorschemes.
+Changed lines sit on deep green / red bands, like Claude Code's and delta's
+diffs: `#022800` / `#3d0101` on dark themes, `#d0ffd0` / `#ffe0e0` on light
+ones. Each band runs through the gutter, whose line numbers and `+` / `−` keep
+your theme's diagnostic colors unless they need raising to 4.5:1 contrast on the
+band. Code keeps its syntax colors without character-level patches or extra
+bolding. Dim comments use Rill-only highlight copies targeting 4.5:1 contrast
+against unchanged, added, and deleted lines; your theme's source-buffer
+highlights remain unchanged. Both layouts share this styling, which updates when
+you change colorschemes.
 
 Each file owns its context expansion. Expanding a file in the stream moves later
 files down; focusing it preserves that expansion. Split mode remains unwrapped
