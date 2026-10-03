@@ -1095,6 +1095,21 @@ return {
     end, { fixture = commits_fixture })
   end,
 
+  ["split refresh titles the commit under the restored After cursor"] = function()
+    with_review(function(session, env)
+      env.control.loads[1].callback(nil, env.snapshot)
+      session:toggle_layout()
+      api.nvim_win_set_cursor(session.main_win, { 1, 0 })
+      place(session, "new", 1, C .. ":src/shared.lua")
+      H.eq(3, session.current_group)
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq(session.right_win, session.last_code_win)
+      H.eq(3, session.current_group, "the Before pane's cursor must not retitle the review")
+      H.eq(C .. ":src/shared.lua", session.current_file)
+      H.ok(eval_bar(session.right_win, "winbar"):find("[3/3] cccccccc Merge side", 1, true))
+    end, { fixture = commits_fixture, auto_load = false, columns = 320 })
+  end,
+
   ["jumping to a file keeps the commit row above it on screen"] = function()
     with_review(function(session)
       vim.wo[session.main_win].scrolloff = 0

@@ -65,7 +65,7 @@ configuration; Rill itself installs only review-buffer mappings.
 | `:Rill A..B` | Same direct snapshot comparison |
 | `:Rill A...B` | Merge base of A and B → B |
 | `:Rill <rev>` | Shorthand for `:Rill commit <rev>` |
-| `:Rill commits <rev>...` | Each commit → its own first parent, one section per commit, in the given order |
+| `:Rill commits <rev>...` | First parent → commit for each rev (empty tree for a root), one section per commit, in the given order |
 
 Append `--split` or `--unified` to choose the initial layout, and `--focus` or
 `--stream` to choose the initial view. Append

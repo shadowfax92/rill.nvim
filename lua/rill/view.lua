@@ -614,7 +614,10 @@ function Session:render(anchor)
   end
   self:render_tree()
   self:restore(anchor)
-  local cursor_row = self.rows[api.nvim_win_get_cursor(self.main_win)[1]]
+  -- Follow the pane restore() put the cursor in: in split, the After pane's
+  -- position names the current file and commit, not the Before pane's.
+  local cursor_win = valid_win(self.last_code_win) and self.last_code_win or self.main_win
+  local cursor_row = self.rows[api.nvim_win_get_cursor(cursor_win)[1]]
   if cursor_row and cursor_row.file then
     self.current_file = cursor_row.file.meta.id
   end
