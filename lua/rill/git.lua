@@ -278,7 +278,10 @@ end
 --- Git emits all NUL metadata before patch sections. Each section is captured only
 --- within per-file/total budgets; skipped sections are drained so later files stay
 --- reviewable. A short boundary tail also handles headers split across OS chunks.
-local function diff_stream(options)
+--- `spent` is patch text already retained by earlier diffs of the same review, so
+--- several diffs share one max_patch_bytes total.
+local function diff_stream(options, spent)
+  local budget = options.max_patch_bytes - (spent or 0)
   local state = { files = {}, bytes = 0 }
   local pending, phase, by_header = "", "metadata", {}
   local current, parts, current_bytes = nil, {}, 0
@@ -295,7 +298,7 @@ local function diff_stream(options)
       reason = "Binary file"
     elseif current_bytes + #data > options.max_file_bytes then
       reason = "Patch exceeds max_file_bytes (" .. options.max_file_bytes .. ")"
-    elseif state.bytes + #data > options.max_patch_bytes then
+    elseif state.bytes + #data > budget then
       reason = "Review exceeds max_patch_bytes (" .. options.max_patch_bytes .. ")"
     end
     if reason then
@@ -387,8 +390,8 @@ local function resolve(owner, root, ref, options, done)
     root,
     { "rev-parse", "--verify", "--quiet", "--end-of-options", ref .. "^{commit}" },
     options,
-    function(err, out)
-      done(err, not err and out:gsub("\n$", "") or nil)
+    function(err, out, result)
+      done(err, not err and out:gsub("\n$", "") or nil, result)
     end
   )
 end
@@ -397,18 +400,35 @@ local function endpoint(kind, rev, label)
   return { kind = kind, rev = rev, label = label or rev or kind }
 end
 
+-- The empty tree's ID depends on the repository's object format (SHA-1/SHA-256);
+-- hashing it from stdin computes it without writing an object.
+local function empty_tree(owner, root, options, callback)
+  owner:run(
+    root,
+    { "hash-object", "-t", "tree", "--stdin" },
+    { stdin = "", timeout = options.timeout },
+    function(err, out)
+      callback(err, not err and endpoint("empty", out:gsub("\n$", ""), "empty tree") or nil)
+    end
+  )
+end
+
+--- One commit reviewed against its first parent; a root commit is compared with
+--- the empty tree. A merge deliberately shows only what it brought into its first
+--- parent. Shared by "commit" and every group of "commits" so the two agree.
+local function commit_endpoints(owner, root, oid, parents, label, options, done)
+  local right = endpoint("commit", oid, label)
+  if parents[1] then
+    done(nil, endpoint("commit", parents[1], label .. "^"), right)
+  else
+    empty_tree(owner, root, options, function(err, left)
+      done(err, left, right)
+    end)
+  end
+end
+
 local function endpoints(owner, root, options, done)
   local mode = options.mode
-  local function empty(callback)
-    owner:run(
-      root,
-      { "hash-object", "-t", "tree", "--stdin" },
-      { stdin = "", timeout = options.timeout },
-      function(err, out)
-        callback(err, not err and endpoint("empty", out:gsub("\n$", ""), "empty tree") or nil)
-      end
-    )
-  end
   local function head_or_empty(callback)
     resolve(owner, root, "HEAD", options, function(err, oid)
       if oid then
@@ -420,7 +440,7 @@ local function endpoints(owner, root, options, done)
           if sym_err then
             callback(err)
           else
-            empty(callback)
+            empty_tree(owner, root, options, callback)
           end
         end)
       end
@@ -444,15 +464,9 @@ local function endpoints(owner, root, options, done)
           done(parent_err)
           return
         end
-        local parent = output:match("^%x+ (%x+)")
-        local right = endpoint("commit", oid, ref)
-        if parent then
-          done(nil, endpoint("commit", parent, ref .. "^"), right)
-        else
-          empty(function(empty_err, left)
-            done(empty_err, left, right)
-          end)
-        end
+        local parents = vim.split(vim.trim(output), " ", { trimempty = true })
+        table.remove(parents, 1)
+        commit_endpoints(owner, root, oid, parents, ref, options, done)
       end)
     end)
   elseif mode == "range" or mode == "branch" then
@@ -469,7 +483,7 @@ local function endpoints(owner, root, options, done)
               -- Inclusive ranges beginning at a root commit have an empty-tree
               -- base. Compute it for this repository's hash algorithm, without
               -- writing a Git object or treating arbitrary invalid refs as empty.
-              empty(function(empty_err, left)
+              empty_tree(owner, root, options, function(empty_err, left)
                 if not empty_err and base == left.rev then
                   done(nil, left, endpoint("commit", head_oid, head))
                 else
@@ -537,7 +551,7 @@ local function endpoints(owner, root, options, done)
   end
 end
 
-local function diff_args(snapshot)
+local function diff_args(left, right, paths)
   local args = {
     "diff",
     "--raw",
@@ -562,7 +576,6 @@ local function diff_args(snapshot)
     "--inter-hunk-context=0",
     "--diff-algorithm=histogram",
   }
-  local left, right = snapshot.left, snapshot.right
   if right.kind == "index" then
     args[#args + 1] = "--cached"
   end
@@ -573,7 +586,7 @@ local function diff_args(snapshot)
     args[#args + 1] = right.rev
   end
   args[#args + 1] = "--"
-  vim.list_extend(args, snapshot.options.paths or {})
+  vim.list_extend(args, paths or {})
   return args
 end
 
@@ -853,6 +866,192 @@ local function load_untracked(owner, snapshot, retained_bytes, callback)
   )
 end
 
+-- Runs one `git diff` between two endpoints into parsed file metadata. `spent`
+-- carries the patch bytes earlier diffs in the same review already retained.
+local function compare(owner, root, left, right, options, spent, done)
+  local stream = diff_stream(options, spent)
+  owner:run(
+    root,
+    diff_args(left, right, options.paths),
+    { sink = stream.feed, timeout = options.timeout },
+    function(err)
+      if err then
+        done(err)
+        return
+      end
+      local ok, result = pcall(stream.finish)
+      if not ok then
+        done(tostring(result))
+        return
+      end
+      done(nil, result, stream.bytes)
+    end
+  )
+end
+
+local COMMIT_FIELDS = 5 -- %H %P %an %ad %s, each NUL-terminated by the format/-z
+
+-- Subject/author/date/parents for every resolved commit in one process. Object IDs
+-- go through stdin so a long selection cannot exceed the argument-size limit.
+-- --encoding pins UTF-8 over i18n.logOutputEncoding: a UTF-16 setting would put
+-- NUL bytes inside fields and break the NUL-delimited records.
+local function describe_commits(owner, root, oids, options, done)
+  owner:run(root, {
+    "log",
+    "--stdin",
+    "--no-walk=unsorted",
+    "--no-show-signature",
+    "--encoding=UTF-8",
+    "-z",
+    "--date=format:%d %b %Y",
+    "--format=%H%x00%P%x00%an%x00%ad%x00%s",
+  }, { stdin = table.concat(oids, "\n") .. "\n", timeout = options.timeout }, function(err, output)
+    if err then
+      done(err)
+      return
+    end
+    local fields = vim.split(output, "\0", { plain = true })
+    local described = {}
+    for start = 1, #fields - COMMIT_FIELDS + 1, COMMIT_FIELDS do
+      described[fields[start]] = {
+        parents = vim.split(fields[start + 1], " ", { trimempty = true }),
+        author = fields[start + 2],
+        date = fields[start + 3],
+        subject = fields[start + 4],
+      }
+    end
+    done(nil, described)
+  end)
+end
+
+--- Commits mode: each listed commit is reviewed against its own first parent and
+--- the results form one composite snapshot (one group per commit, given order).
+--- The view renders group headers from `groups` and reads sources through each
+--- file's group snapshot. Every step runs sequentially under the request's single
+--- owner, so one cancel (refresh/close) stops whichever Git job is in flight and
+--- schedules nothing further. A rev that does not resolve fails the whole review:
+--- a partial one would silently omit a commit the caller asked for.
+local function load_commits(owner, root, options, done)
+  local items = {}
+  for _, item in ipairs(options.commits or {}) do
+    item = type(item) == "string" and { rev = item } or item
+    -- Checked before any job starts: a bad item would otherwise throw inside a
+    -- scheduled callback and leave the request without a reply.
+    if type(item) ~= "table" or type(item.rev) ~= "string" or item.rev == "" then
+      done("Commit review items need a revision")
+      return
+    end
+    items[#items + 1] = item
+  end
+  if #items == 0 then
+    done("Commit review requires at least one commit")
+    return
+  end
+  local selected, seen = {}, {}
+  local groups, files, spent = {}, {}, 0
+
+  local function diff_group(index)
+    local group = groups[index]
+    if not group then
+      done(nil, {
+        root = root,
+        options = options,
+        label = #groups == 1 and "1 commit" or (#groups .. " commits"),
+        left = groups[1].snapshot.left,
+        right = groups[#groups].snapshot.right,
+        groups = groups,
+        files = files,
+      })
+      return
+    end
+    local group_options = vim.tbl_extend("force", options, { paths = selected[index].paths or options.paths })
+    commit_endpoints(owner, root, group.oid, group.parents, group.short, options, function(err, left, right)
+      if err then
+        done(err)
+        return
+      end
+      compare(owner, root, left, right, group_options, spent, function(diff_err, metas, retained)
+        if diff_err then
+          done(diff_err)
+          return
+        end
+        spent = spent + retained
+        table.sort(metas, function(a, b)
+          return a.path < b.path
+        end)
+        for _, meta in ipairs(metas) do
+          -- The same path can change in several commits; IDs stay unique table keys.
+          meta.group, meta.id = index, group.oid .. ":" .. meta.path
+          files[#files + 1] = meta
+        end
+        group.snapshot = {
+          root = root,
+          options = group_options,
+          label = left.label .. " → " .. right.label,
+          left = left,
+          right = right,
+          files = metas,
+        }
+        diff_group(index + 1)
+      end)
+    end)
+  end
+
+  local function resolve_item(index)
+    local item = items[index]
+    if not item then
+      local oids = vim.tbl_map(function(entry)
+        return entry.oid
+      end, selected)
+      describe_commits(owner, root, oids, options, function(err, described)
+        if err then
+          done(err)
+          return
+        end
+        for position, oid in ipairs(oids) do
+          local info = described[oid]
+          if not info then
+            done("Git did not describe commit " .. oid)
+            return
+          end
+          groups[position] = {
+            index = position,
+            oid = oid,
+            short = oid:sub(1, 8),
+            subject = info.subject,
+            author = info.author,
+            date = info.date,
+            parents = info.parents,
+            merge = #info.parents > 1,
+            root_commit = #info.parents == 0,
+          }
+        end
+        diff_group(1)
+      end)
+      return
+    end
+    resolve(owner, root, item.rev, options, function(err, oid, result)
+      if err then
+        -- --quiet turns "no such commit" into a silent exit 1; anything else
+        -- (timeouts, repository errors) keeps Git's own message.
+        local unknown = result and result.code == 1
+        done(
+          unknown and ("Not a commit: " .. item.rev) or ("Cannot resolve commit " .. item.rev .. ": " .. err)
+        )
+        return
+      end
+      -- Duplicates (two names for one commit) keep their first position and paths.
+      if not seen[oid] then
+        seen[oid] = true
+        selected[#selected + 1] = { oid = oid, paths = item.paths }
+      end
+      resolve_item(index + 1)
+    end)
+  end
+
+  resolve_item(1)
+end
+
 --- Load one comparison without moving refs, touching the index, or opening buffers.
 --- Returned commit endpoints and index blob IDs stay pinned even if Git changes
 --- afterward. Worktree sources are mutable and must pass model hydration checks.
@@ -860,56 +1059,55 @@ function M.load(opts, callback)
   local owner = scope(callback)
   local options = defaults(opts)
   local cwd = options.cwd or uv.cwd()
+  local function ready(err, snapshot)
+    if not err then
+      -- Commits mode keeps its groups in the caller's order; other modes have
+      -- no group and sort by path alone.
+      table.sort(snapshot.files, function(a, b)
+        if a.group ~= b.group then
+          return (a.group or 0) < (b.group or 0)
+        end
+        return a.path < b.path
+      end)
+    end
+    owner:finish(err, not err and snapshot or nil)
+  end
   owner:run(cwd, { "rev-parse", "--show-toplevel" }, options, function(root_err, output)
     if root_err then
       owner:finish(root_err)
       return
     end
     local root = output:gsub("\n$", "")
+    if options.mode == "commits" then
+      load_commits(owner, root, options, ready)
+      return
+    end
     endpoints(owner, root, options, function(endpoint_err, left, right)
       if endpoint_err then
         owner:finish(endpoint_err)
         return
       end
-      local snapshot = {
-        root = root,
-        label = left.label .. " → " .. right.label,
-        left = left,
-        right = right,
-        files = {},
-        options = options,
-      }
-      local stream = diff_stream(options)
-      owner:run(
-        root,
-        diff_args(snapshot),
-        { sink = stream.feed, timeout = options.timeout },
-        function(diff_err)
-          if diff_err then
-            owner:finish(diff_err)
-            return
-          end
-          local ok, result = pcall(stream.finish)
-          if not ok then
-            owner:finish(tostring(result))
-            return
-          end
-          snapshot.files = result
-          local function ready(err)
-            if not err then
-              table.sort(snapshot.files, function(a, b)
-                return a.path < b.path
-              end)
-            end
-            owner:finish(err, not err and snapshot or nil)
-          end
-          if right.kind == "worktree" then
-            load_untracked(owner, snapshot, stream.bytes, ready)
-          else
-            ready()
-          end
+      compare(owner, root, left, right, options, 0, function(diff_err, files, retained)
+        if diff_err then
+          owner:finish(diff_err)
+          return
         end
-      )
+        local snapshot = {
+          root = root,
+          label = left.label .. " → " .. right.label,
+          left = left,
+          right = right,
+          files = files,
+          options = options,
+        }
+        if right.kind == "worktree" then
+          load_untracked(owner, snapshot, retained, function(err)
+            ready(err, snapshot)
+          end)
+        else
+          ready(nil, snapshot)
+        end
+      end)
     end)
   end)
   return function()
