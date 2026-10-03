@@ -238,6 +238,18 @@ return {
     end)
   end,
 
+  commits_mode_reads_metadata_as_utf8_whatever_the_log_encoding = function()
+    fixture(function(root)
+      H.write(root, "a", { "one" })
+      H.commit(root, "ünïcödé subject")
+      -- A UTF-16 log encoding puts NUL bytes inside fields; Latin-1 would mangle them.
+      H.command({ "git", "config", "i18n.logOutputEncoding", "UTF-16" }, root)
+      local snapshot = commits(root, { "HEAD" })
+      H.eq("ünïcödé subject", snapshot.groups[1].subject)
+      H.eq("Rill Tests", snapshot.groups[1].author)
+    end)
+  end,
+
   commits_mode_fails_whole_load_on_one_bad_rev = function()
     fixture(function(root)
       H.write(root, "a", { "one" })

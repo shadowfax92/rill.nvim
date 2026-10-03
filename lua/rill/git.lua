@@ -893,12 +893,15 @@ local COMMIT_FIELDS = 5 -- %H %P %an %ad %s, each NUL-terminated by the format/-
 
 -- Subject/author/date/parents for every resolved commit in one process. Object IDs
 -- go through stdin so a long selection cannot exceed the argument-size limit.
+-- --encoding pins UTF-8 over i18n.logOutputEncoding: a UTF-16 setting would put
+-- NUL bytes inside fields and break the NUL-delimited records.
 local function describe_commits(owner, root, oids, options, done)
   owner:run(root, {
     "log",
     "--stdin",
     "--no-walk=unsorted",
     "--no-show-signature",
+    "--encoding=UTF-8",
     "-z",
     "--date=format:%d %b %Y",
     "--format=%H%x00%P%x00%an%x00%ad%x00%s",
