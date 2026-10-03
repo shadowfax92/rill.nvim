@@ -37,11 +37,13 @@ function M.render(opts)
   while #actions > 1 and width(actions) + 2 > opts.width do
     table.remove(actions, #actions - 1)
   end
+  -- Titles carry multibyte separators (·, →) and commit subjects, so both fit
+  -- checks measure display columns; a byte count would blank a fitting title.
   local title = opts.title
   if vim.fn.strdisplaywidth(title) + width(actions) + 4 > opts.width then
     title = opts.layout == "split" and (opts.side == "old" and "Before" or "After") or "Rill"
   end
-  if #title + width(actions) + 4 > opts.width then
+  if vim.fn.strdisplaywidth(title) + width(actions) + 4 > opts.width then
     title = ""
   end
   local parts = { "%#RillBarHint# " .. escape(title) .. "%=" }

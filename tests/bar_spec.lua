@@ -31,6 +31,20 @@ return {
     H.ok(narrow:find("g? help", 1, true))
   end,
 
+  ["a title that fits in display columns is kept despite multibyte separators"] = function()
+    local title = "[2/5] b5fe24cc T1 add TEMP line to shared.txt · unified · focused"
+    local actions =
+      Bar.render({ width = 999, layout = "unified", title = "", focused = true, commits = true })
+    local columns = vim.api.nvim_eval_statusline(actions, { use_winbar = true, maxwidth = 999 }).str
+    -- Exactly wide enough for the title by display width, two columns short by bytes.
+    local width = vim.fn.strdisplaywidth(vim.trim(columns)) + vim.fn.strdisplaywidth(title) + 4
+    H.ok(#title > vim.fn.strdisplaywidth(title), "fixture must contain multibyte characters")
+    local value =
+      Bar.render({ width = width, layout = "unified", title = title, focused = true, commits = true })
+    local shown = vim.api.nvim_eval_statusline(value, { use_winbar = true, maxwidth = width }).str
+    H.ok(shown:find(title, 1, true), shown)
+  end,
+
   ["top bar keeps actions visible across layouts and narrow widths"] = function()
     local unified = rendered(150)
     for _, label in ipairs({
