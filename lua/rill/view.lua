@@ -76,11 +76,18 @@ function M.gutter(win)
   end
   local row = binding.session.rows[vim.v.lnum]
   local width = binding.session.digits or 4
-  if not row or row.kind ~= "code" or vim.v.virtnum ~= 0 then
-    return string.rep(" ", binding.side == "unified" and (width * 2 + 5) or (width + 3))
+  local blank = string.rep(" ", binding.side == "unified" and (width * 2 + 5) or (width + 3))
+  -- Negative virtnum rows are virtual lines drawn above a row, not part of it.
+  if not row or row.kind ~= "code" or vim.v.virtnum < 0 then
+    return blank
   end
   local kind = changed(row, binding.side)
   local group = kind == "add" and "RillAddSign" or kind == "delete" and "RillDeleteSign" or "RillNumber"
+  if vim.v.virtnum > 0 then
+    -- The band covers the gutter, so wrapped rows of a changed line continue it
+    -- there; numbers and signs appear only on the first screen row.
+    return kind and ("%%#%s#%s%%*"):format(group, blank) or blank
+  end
   local sign = kind == "add" and "+" or kind == "delete" and "−" or " "
   local function num(cell)
     return cell and tostring(cell.line) or ""
