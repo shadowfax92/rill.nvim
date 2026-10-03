@@ -248,6 +248,8 @@ return {
       H.eq("Not a commit: no-such-rev", err)
       err = load_error(root, { mode = "commits", commits = {} })
       H.ok(err:find("at least one commit", 1, true), err)
+      err = load_error(root, { mode = "commits", commits = { "HEAD", { paths = { "a" } } } })
+      H.eq("Commit review items need a revision", err)
       local tree = H.command({ "git", "rev-parse", "HEAD^{tree}" }, root)
       err = load_error(root, { mode = "commits", commits = { { rev = tree } } })
       H.eq("Not a commit: " .. tree, err)

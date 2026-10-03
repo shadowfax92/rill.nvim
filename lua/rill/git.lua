@@ -931,7 +931,14 @@ end
 local function load_commits(owner, root, options, done)
   local items = {}
   for _, item in ipairs(options.commits or {}) do
-    items[#items + 1] = type(item) == "string" and { rev = item } or item
+    item = type(item) == "string" and { rev = item } or item
+    -- Checked before any job starts: a bad item would otherwise throw inside a
+    -- scheduled callback and leave the request without a reply.
+    if type(item) ~= "table" or type(item.rev) ~= "string" or item.rev == "" then
+      done("Commit review items need a revision")
+      return
+    end
+    items[#items + 1] = item
   end
   if #items == 0 then
     done("Commit review requires at least one commit")
