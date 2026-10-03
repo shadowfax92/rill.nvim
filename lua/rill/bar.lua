@@ -20,7 +20,13 @@ function M.render(opts)
   if opts.layout == "split" and opts.side == "new" then
     actions = { { "zo", "context" }, { "zR", "full file" }, { "Enter", "source" }, { "g?", "help" } }
   else
-    actions = { { "Tab/S-Tab", "files" }, { "gs", layout }, { "gf", focus } }
+    actions = { { "Tab/S-Tab", "files" } }
+    -- Multi-commit reviews add commit jumps right after file movement, so they
+    -- outlive the context shortcuts when a narrow pane sheds actions.
+    if opts.commits then
+      actions[#actions + 1] = { "]C/[C", "commits" }
+    end
+    vim.list_extend(actions, { { "gs", layout }, { "gf", focus } })
     if opts.layout ~= "split" then
       vim.list_extend(actions, { { "zo", "context" }, { "zR", "full file" }, { "Enter", "source" } })
     end
@@ -31,11 +37,13 @@ function M.render(opts)
   while #actions > 1 and width(actions) + 2 > opts.width do
     table.remove(actions, #actions - 1)
   end
+  -- Titles carry multibyte separators (·, →) and commit subjects, so both fit
+  -- checks measure display columns; a byte count would blank a fitting title.
   local title = opts.title
   if vim.fn.strdisplaywidth(title) + width(actions) + 4 > opts.width then
     title = opts.layout == "split" and (opts.side == "old" and "Before" or "After") or "Rill"
   end
-  if #title + width(actions) + 4 > opts.width then
+  if vim.fn.strdisplaywidth(title) + width(actions) + 4 > opts.width then
     title = ""
   end
   local parts = { "%#RillBarHint# " .. escape(title) .. "%=" }

@@ -35,6 +35,40 @@ local function display_label(text)
   return (text:gsub("[\n\r\t]", { ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }))
 end
 
+-- Commits mode (open_commits) loads a composite snapshot whose groups are the
+-- reviewed commits, oldest first; every file meta names its group. The row
+-- label heads a commit's files in the document; the tree node and the window
+-- title use shorter forms because their width is scarce.
+local function group_label(index, total, group, form)
+  local short, subject = group.short or "", group.subject or ""
+  if form == "title" then
+    return ("[%d/%d] %s %s"):format(index, total, short, subject)
+  elseif form == "tree" then
+    return ("%d/%d %s %s"):format(index, total, short, subject)
+  end
+  local text = ("● %d/%d  %s  %s — %s · %s"):format(
+    index,
+    total,
+    short,
+    subject,
+    group.author or "",
+    group.date or ""
+  )
+  if group.merge then
+    text = text .. " · merge vs 1st parent"
+  end
+  if group.root_commit then
+    text = text .. " · root"
+  end
+  return text
+end
+
+-- The commit a document row belongs to: commit rows and "(no changes)" rows
+-- carry it directly, file rows through their meta.
+local function row_group(row)
+  return row and (row.group or (row.file and row.file.meta.group))
+end
+
 local function changed(row, side)
   if row.kind ~= "code" then
     return
@@ -175,6 +209,8 @@ local function initialize()
       end
       if row.kind == "file" then
         mark(buf, line, { line_hl_group = "RillHeader", priority = 50 })
+      elseif row.kind == "group" then
+        mark(buf, line, { line_hl_group = "RillGroup", priority = 50 })
       elseif row.kind == "gap" then
         mark(buf, line, { line_hl_group = "RillGap", priority = 50 })
       elseif row.kind == "hunk" or row.kind == "meta" then
@@ -204,6 +240,12 @@ local function initialize()
       end
     end,
   })
+end
+
+-- The commits of an open_commits review, oldest first; nil for one comparison.
+function Session:groups()
+  local groups = self.snapshot and self.snapshot.groups
+  return groups and #groups > 0 and groups or nil
 end
 
 function Session:buffer(key, side, tree)
@@ -307,10 +349,22 @@ function Session:titles()
       return oid:sub(1, 8)
     end)
   end
-  local title = self.snapshot and (revision(self.snapshot.left) .. " → " .. revision(self.snapshot.right))
-    or "Loading Git changes…"
+  local groups = self:groups()
+  local title, count = nil, #self.files .. " files "
+  if groups then
+    -- One composite comparison spans several commits; name the commit under
+    -- the cursor instead of the first parent → last commit endpoints.
+    local index = groups[self.current_group] and self.current_group or 1
+    title = group_label(index, #groups, groups[index], "title")
+    count = #self.files .. " files · " .. #groups .. " commits "
+  else
+    title = self.snapshot and (revision(self.snapshot.left) .. " → " .. revision(self.snapshot.right))
+      or "Loading Git changes…"
+  end
   local mode = self.layout .. (self.focus_id and " · focused" or " · stream")
-  local path = self.current_file or ""
+  -- current_file is a file id; commits mode namespaces ids as oid:path.
+  local current = self.by_id[self.current_file]
+  local path = current and current.meta.path or ""
   for index, win in ipairs({ self.main_win, self.right_win }) do
     if valid_win(win) then
       local side = self.layout == "split" and (index == 1 and "Before · " or "After · ") or ""
@@ -320,8 +374,9 @@ function Session:titles()
         layout = self.layout,
         side = index == 1 and "old" or "new",
         focused = self.focus_id ~= nil,
+        commits = groups ~= nil,
       })
-      vim.wo[win].statusline = "%#RillMuted# Rill · %<" .. escaped(path) .. "%=" .. #self.files .. " files "
+      vim.wo[win].statusline = "%#RillMuted# Rill · %<" .. escaped(path) .. "%=" .. count
     end
   end
   if valid_win(self.tree_win) then
@@ -422,12 +477,25 @@ function Session:restore(anchor)
       local cell = cell_for(self.rows[target], binding.side)
       api.nvim_win_set_cursor(win, { target, math.min(anchor.col or 0, cell and #cell.text or 0) })
       api.nvim_win_call(win, function()
-        vim.fn.winrestview({ topline = math.max(1, target - (anchor.offset or 3)) })
+        vim.fn.winrestview({
+          topline = math.min(math.max(1, target - (anchor.offset or 3)), self:topline(target)),
+        })
       end)
       self.last_code_win = win
       self:sync_scroll(win)
     end
   end
+end
+
+-- The highest topline that still shows the row at index. A commit row directly
+-- above a file header names the commit the file belongs to, so scrolling that
+-- header to the top must not hide it (focus renders exactly this pair).
+function Session:topline(index)
+  local row, previous = self.rows[index], self.rows[index - 1]
+  if row and row.kind == "file" and previous and previous.kind == "group" then
+    return index - 1
+  end
+  return index
 end
 
 function Session:sync_scroll(win)
@@ -454,34 +522,69 @@ function Session:render(anchor)
   self.rows, self.file_rows, self.hunk_rows = {}, {}, {}
   self.digits = 4
   local model = require("rill.model")
-  for _, file in ipairs(self.files) do
-    if not self.focus_id or file.meta.id == self.focus_id then
-      local meta = file.meta
-      local rename = meta.old_path and meta.old_path ~= meta.path and (meta.old_path .. " → ") or ""
-      local stats = ("  +%d −%d"):format(meta.additions or 0, meta.deletions or 0)
-      self.file_rows[meta.id] = #self.rows + 1
-      self.rows[#self.rows + 1] = {
-        kind = "file",
-        file = file,
-        text = (self.collapsed[meta.id] and "▸ " or "▾ ") .. rename .. meta.path .. stats,
-      }
-      if not self.collapsed[meta.id] then
-        local previous_hunk
-        for _, row in ipairs(model.project(file, self.layout)) do
-          row.file = file
-          if row.hunk and row.hunk ~= previous_hunk and row.kind == "code" then
-            self.hunk_rows[#self.hunk_rows + 1] = #self.rows + 1
-            previous_hunk = row.hunk
-          end
-          self.rows[#self.rows + 1] = row
-          self.digits = math.max(
-            self.digits,
-            #tostring(row.old and row.old.line or 0),
-            #tostring(row.new and row.new.line or 0)
-          )
+  local function add_file(file)
+    local meta = file.meta
+    local rename = meta.old_path and meta.old_path ~= meta.path and (meta.old_path .. " → ") or ""
+    local stats = ("  +%d −%d"):format(meta.additions or 0, meta.deletions or 0)
+    self.file_rows[meta.id] = #self.rows + 1
+    self.rows[#self.rows + 1] = {
+      kind = "file",
+      file = file,
+      text = (self.collapsed[meta.id] and "▸ " or "▾ ") .. rename .. meta.path .. stats,
+    }
+    if not self.collapsed[meta.id] then
+      local previous_hunk
+      for _, row in ipairs(model.project(file, self.layout)) do
+        row.file = file
+        if row.hunk and row.hunk ~= previous_hunk and row.kind == "code" then
+          self.hunk_rows[#self.hunk_rows + 1] = #self.rows + 1
+          previous_hunk = row.hunk
+        end
+        self.rows[#self.rows + 1] = row
+        self.digits = math.max(
+          self.digits,
+          #tostring(row.old and row.old.line or 0),
+          #tostring(row.new and row.new.line or 0)
+        )
+      end
+    end
+    self.rows[#self.rows + 1] = { kind = "meta", file = file, text = "" }
+  end
+  local groups = self:groups()
+  if groups then
+    local shown = {}
+    for index = 1, #groups do
+      shown[index] = {}
+    end
+    for _, file in ipairs(self.files) do
+      local members = shown[file.meta.group]
+      if members and (not self.focus_id or file.meta.id == self.focus_id) then
+        members[#members + 1] = file
+      end
+    end
+    -- Each commit row carries the first file rendered under it, so cursor,
+    -- anchor, gf and Sidekick context treat it like that file's header. Focus
+    -- renders only the focused file's commit; the stream renders every commit,
+    -- an empty one as "(no changes)", so a requested commit never vanishes.
+    for index, group in ipairs(groups) do
+      local members = shown[index]
+      if #members > 0 or not self.focus_id then
+        self.rows[#self.rows + 1] =
+          { kind = "group", group = index, file = members[1], text = group_label(index, #groups, group) }
+        if #members == 0 then
+          self.rows[#self.rows + 1] = { kind = "meta", group = index, text = "  (no changes)" }
+          self.rows[#self.rows + 1] = { kind = "meta", group = index, text = "" }
+        end
+        for _, file in ipairs(members) do
+          add_file(file)
         end
       end
-      self.rows[#self.rows + 1] = { kind = "meta", file = file, text = "" }
+    end
+  else
+    for _, file in ipairs(self.files) do
+      if not self.focus_id or file.meta.id == self.focus_id then
+        add_file(file)
+      end
     end
   end
   if #self.rows == 0 then
@@ -511,10 +614,14 @@ function Session:render(anchor)
   end
   self:render_tree()
   self:restore(anchor)
-  local cursor_row = self.rows[api.nvim_win_get_cursor(self.main_win)[1]]
+  -- Follow the pane restore() put the cursor in: in split, the After pane's
+  -- position names the current file and commit, not the Before pane's.
+  local cursor_win = valid_win(self.last_code_win) and self.last_code_win or self.main_win
+  local cursor_row = self.rows[api.nvim_win_get_cursor(cursor_win)[1]]
   if cursor_row and cursor_row.file then
     self.current_file = cursor_row.file.meta.id
   end
+  self.current_group = row_group(cursor_row) or self.current_group
   self:titles()
   self:highlight_tree()
   self.rendering = false
@@ -525,9 +632,10 @@ function Session:render_tree()
   if not valid_win(self.tree_win) then
     return
   end
-  local root = { children = {}, order = {} }
-  for _, file in ipairs(self.files) do
-    local parts, node, path = vim.split(file.meta.path, "/", { plain = true }), root, ""
+  -- Node paths double as closed_dirs keys. Commits mode prefixes them with
+  -- "@<group>" so the same directory in two commits folds independently.
+  local function insert(root, file, prefix)
+    local parts, node, path = vim.split(file.meta.path, "/", { plain = true }), root, prefix
     for index, name in ipairs(parts) do
       path = path == "" and name or path .. "/" .. name
       if not node.children[name] then
@@ -538,6 +646,20 @@ function Session:render_tree()
       if index == #parts then
         node.file = file
       end
+    end
+  end
+  local groups = self:groups()
+  local roots = {}
+  for index = 1, groups and #groups or 1 do
+    roots[index] = { children = {}, order = {} }
+  end
+  for _, file in ipairs(self.files) do
+    local group = groups and file.meta.group
+    if not groups then
+      insert(roots[1], file, "")
+    elseif roots[group] then
+      roots[group].first = roots[group].first or file
+      insert(roots[group], file, "@" .. group)
     end
   end
   local lines, entries = {}, {}
@@ -569,7 +691,25 @@ function Session:render_tree()
       end
     end
   end
-  visit(root, 0)
+  if groups then
+    -- A commit node folds like a directory (za) and carries its first file,
+    -- so Enter, gf and context() on it act on that file.
+    for index, group in ipairs(groups) do
+      local key, root = "@" .. index, roots[index]
+      lines[#lines + 1] = (self.closed_dirs[key] and "▸ " or "▾ ")
+        .. group_label(index, #groups, group, "tree")
+      entries[#entries + 1] = { group = index, key = key, file = root.first }
+      if not self.closed_dirs[key] then
+        if #root.order == 0 then
+          lines[#lines + 1] = "  (no changes)"
+          entries[#entries + 1] = { placeholder = true }
+        end
+        visit(root, 1)
+      end
+    end
+  else
+    visit(roots[1], 0)
+  end
   self.tree_entries = entries
   local buf = self:buffer("files", nil, true)
   for i, line in ipairs(lines) do
@@ -589,9 +729,11 @@ function Session:highlight_tree()
   end
   api.nvim_buf_clear_namespace(buf, tree_ns, 0, -1)
   for index, entry in ipairs(self.tree_entries or {}) do
-    if entry.file and entry.file.meta.id == self.current_file then
+    if entry.group then
+      api.nvim_buf_set_extmark(buf, tree_ns, index - 1, 0, { line_hl_group = "RillGroup" })
+    elseif entry.file and entry.file.meta.id == self.current_file then
       api.nvim_buf_set_extmark(buf, tree_ns, index - 1, 0, { line_hl_group = "RillTreeCurrent" })
-    elseif entry.directory then
+    elseif entry.directory or entry.placeholder then
       api.nvim_buf_set_extmark(buf, tree_ns, index - 1, 0, { line_hl_group = "RillMuted" })
     end
   end
@@ -620,9 +762,14 @@ function Session:cursor_changed(buf)
   end
   self.last_code_win = api.nvim_get_current_win()
   local row = self.rows[api.nvim_win_get_cursor(0)[1]]
+  local group = row_group(row)
   if row and row.file and self.current_file ~= row.file.meta.id then
-    self.current_file = row.file.meta.id
+    self.current_file, self.current_group = row.file.meta.id, group or self.current_group
     self:highlight_tree()
+    self:titles()
+  elseif group and group ~= self.current_group then
+    -- An empty commit's rows have no file but still name their commit.
+    self.current_group = group
     self:titles()
   end
   self:queue_visible()
@@ -819,9 +966,12 @@ function Session:load(opts)
       notify(self.error, vim.log.levels.ERROR)
       return
     end
-    local previous, files = {}, {}
-    for _, file in ipairs(self.files) do
+    local previous, files, by_id, focus_index = {}, {}, {}, nil
+    for index, file in ipairs(self.files) do
       previous[file.meta.id] = file
+      if file.meta.id == self.focus_id then
+        focus_index = index
+      end
     end
     for _, meta in ipairs(snapshot.files) do
       local file = require("rill.model").parse(meta)
@@ -829,23 +979,38 @@ function Session:load(opts)
       if old and old.meta.patch == meta.patch and next(old.expansion) then
         file.pending_expansion = vim.deepcopy(old.expansion)
       end
-      file.snapshot = snapshot
+      -- In commits mode each file belongs to one commit's own comparison.
+      -- Source reads, Enter-to-source and context() revisions all follow
+      -- file.snapshot, so they resolve against that commit, not the composite.
+      local group = meta.group and snapshot.groups and snapshot.groups[meta.group]
+      file.snapshot = group and group.snapshot or snapshot
       file.syntax_limits = { max_lines = self.opts.syntax_max_lines, max_bytes = self.opts.syntax_max_bytes }
       files[#files + 1] = file
+      by_id[meta.id] = file
     end
     for _, file in ipairs(self.files) do
       require("rill.highlight").dispose(file)
     end
-    self.snapshot, self.files = snapshot, files
-    if
-      self.focus_id
-      and not vim.iter(files):any(function(file)
-        return file.meta.id == self.focus_id
-      end)
-    then
-      self.focus_id = nil
+    self.snapshot, self.files, self.by_id = snapshot, files, by_id
+    local target = anchor
+    if self.pending_focus and #files > 0 then
+      -- view = "focus" applies once, on the first load that has files: an
+      -- empty comparison stays in the stream and a later refresh still
+      -- focuses. After that, refreshes keep whatever the reviewer chose.
+      self.pending_focus = false
+      self.focus_id = anchor and by_id[anchor.file_id] and anchor.file_id or files[1].meta.id
+      if self.focus_id ~= (anchor and anchor.file_id) then
+        target = { file_id = self.focus_id, kind = "file" }
+      end
+    elseif self.focus_id and not by_id[self.focus_id] then
+      -- The focused file left the comparison (committed, reverted, …). Focus
+      -- whichever file now sits at its index rather than dropping the reviewer
+      -- into the whole stream; only an empty comparison returns to it.
+      local file = files[math.min(focus_index or 1, #files)]
+      self.focus_id = file and file.meta.id
+      target = file and { file_id = file.meta.id, kind = "file" } or anchor
     end
-    self:render(anchor)
+    self:render(target)
     -- Expanded rows depend on full sources. Revalidate the new comparison before
     -- restoring them, even when its compact patch looks identical: unchanged
     -- worktree text may have changed since the previous snapshot was captured.
@@ -885,6 +1050,9 @@ function Session:toggle_layout()
 end
 
 function Session:toggle_focus()
+  -- An explicit gf is the reviewer's choice; the opening view = "focus"
+  -- preference must not override it on a later refresh.
+  self.pending_focus = false
   local file = self:current()
   if not file then
     return
@@ -916,10 +1084,44 @@ function Session:jump_file(file)
     api.nvim_set_current_win(self.main_win)
     api.nvim_win_set_cursor(self.main_win, { index, 0 })
     vim.cmd("normal! zt")
+    local top = self:topline(index)
+    if top < vim.fn.line("w0") then
+      vim.fn.winrestview({ topline = top })
+    end
     self:sync_scroll(self.main_win)
-    self.current_file = file.meta.id
+    self.current_file, self.current_group = file.meta.id, file.meta.group or self.current_group
     self:highlight_tree()
+    self:titles()
     self:queue_visible()
+  end
+end
+
+-- ]C / [C: the first file of the next / previous commit that has changes,
+-- wrapping like Tab. Empty commits have no file to land on and are skipped.
+function Session:move_commit(direction)
+  local groups = self:groups()
+  if not groups or #self.files == 0 then
+    return
+  end
+  local first = {}
+  for _, file in ipairs(self.files) do
+    local group = file.meta.group
+    if group and not first[group] then
+      first[group] = file
+    end
+  end
+  local file, row, entry = self:current()
+  local current = (entry and entry.group)
+    or row_group(row)
+    or (file and file.meta.group)
+    or self.current_group
+    or 1
+  for step = 1, #groups do
+    local target = first[(current - 1 + direction * step) % #groups + 1]
+    if target then
+      self:jump_file(target)
+      return
+    end
   end
 end
 
@@ -1022,7 +1224,14 @@ function Session:collapse_context()
 end
 
 function Session:toggle_file()
-  local file = self:current()
+  local file, _, entry = self:current()
+  -- In the tree, za folds the node under the cursor: a commit or a directory.
+  local key = entry and (entry.key or entry.directory)
+  if key then
+    self.closed_dirs[key] = not self.closed_dirs[key]
+    self:render_tree()
+    return
+  end
   if not file then
     return
   end
@@ -1055,6 +1264,13 @@ function Session:open_source()
   end
   if entry and file then
     self:jump_file(file)
+    return
+  end
+  if row and row.kind == "group" then
+    -- A commit row has no source of its own; Enter moves to its first file.
+    if file then
+      self:jump_file(file)
+    end
     return
   end
   if row and row.kind == "gap" then
@@ -1129,10 +1345,11 @@ function Session:open_source()
 end
 
 function Session:help()
+  local commits = self:groups() ~= nil
   local lines = {
     "Rill · Git review",
     "",
-    "Tab / S-Tab  next / previous file",
+    commits and "Tab / S-Tab  next / previous file, across commits" or "Tab / S-Tab  next / previous file",
     "gs        unified / split",
     "gf        focus current file / return to stream",
     "[f / ]f   previous / next file",
@@ -1142,7 +1359,7 @@ function Session:help()
     "zO        expand entire gap",
     "zR        show full current file",
     "zM        collapse unchanged context",
-    "za        collapse / expand current file",
+    "za        collapse / expand current file · tree: fold commit / directory",
     "gT        toggle file tree",
     "gw        toggle wrapping (unified)",
     "gr        refresh comparison",
@@ -1157,6 +1374,10 @@ function Session:help()
     "",
     "Press q or Escape to close help.",
   }
+  if commits then
+    -- Right after the "[c / ]c" hunk line.
+    table.insert(lines, 8, "[C / ]C   previous / next commit")
+  end
   local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -1242,6 +1463,19 @@ function Session:keys(buf, tree)
       "Previous hunk",
       function()
         self:move("hunk", -1)
+      end,
+    },
+    -- Mapped in every review; a single comparison has no commits to visit.
+    ["]C"] = {
+      "Next commit",
+      function()
+        self:move_commit(1)
+      end,
+    },
+    ["[C"] = {
+      "Previous commit",
+      function()
+        self:move_commit(-1)
       end,
     },
     ["zo"] = {
@@ -1371,8 +1605,11 @@ function M.open(opts)
     main_win = api.nvim_get_current_win(),
     layout = opts.layout or "unified",
     opts = opts,
+    -- view = "focus" is honored once, by the first load that finds files.
+    pending_focus = opts.view == "focus",
     rows = {},
     files = {},
+    by_id = {},
     bufs = {},
     source_bufs = {},
     jobs = {},

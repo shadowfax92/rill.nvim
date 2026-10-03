@@ -51,6 +51,87 @@ local function fixture(root)
   return snapshot, sources
 end
 
+-- The composite snapshot rill.git returns for open_commits (decision §1c): one
+-- group per commit in the given order, each with its own commit-mode snapshot,
+-- and every meta tagged with its group and namespaced as oid:path. Commit 1 is
+-- a root commit, commit 2 changes nothing, commit 3 is a merge that changes a
+-- path commit 1 also touched, so that path appears twice with distinct ids.
+local A, B, C = string.rep("a", 40), string.rep("b", 40), string.rep("c", 40)
+local function commits_fixture(root)
+  local sources = {
+    [A .. ":src/a.lua"] = { old = {}, new = { "alpha", "beta" } },
+    [A .. ":src/shared.lua"] = { old = {}, new = { "one" } },
+    [C .. ":src/shared.lua"] = { old = { "one" }, new = { "two" } },
+  }
+  local function meta(oid, group, path, status, patch, additions, deletions)
+    return {
+      id = oid .. ":" .. path,
+      group = group,
+      path = path,
+      status = status,
+      additions = additions,
+      deletions = deletions,
+      patch = patch,
+    }
+  end
+  local metas = {
+    {
+      meta(A, 1, "src/a.lua", "A", "@@ -0,0 +1,2 @@\n+alpha\n+beta\n", 2, 0),
+      meta(A, 1, "src/shared.lua", "A", "@@ -0,0 +1 @@\n+one\n", 1, 0),
+    },
+    {},
+    { meta(C, 3, "src/shared.lua", "M", "@@ -1 +1 @@\n-one\n+two\n", 1, 1) },
+  }
+  local function group(index, oid, fields, left)
+    return vim.tbl_extend("force", {
+      index = index,
+      oid = oid,
+      short = oid:sub(1, 8),
+      author = "Ada",
+      date = "03 Oct 2026",
+      merge = #fields.parents > 1,
+      root_commit = #fields.parents == 0,
+      snapshot = {
+        root = root,
+        options = {},
+        label = oid:sub(1, 8) .. "^ → " .. oid:sub(1, 8),
+        left = left,
+        right = { kind = "commit", rev = oid, label = oid },
+        files = metas[index],
+      },
+    }, fields)
+  end
+  local groups = {
+    group(
+      1,
+      A,
+      { subject = "Add a", parents = {} },
+      { kind = "empty", rev = "4b825dc6", label = "empty tree" }
+    ),
+    group(2, B, { subject = "Nothing", parents = { A } }, { kind = "commit", rev = A, label = B .. "^" }),
+    group(
+      3,
+      C,
+      { subject = "Merge side", parents = { B, "f00d" } },
+      { kind = "commit", rev = B, label = C .. "^" }
+    ),
+  }
+  local files = {}
+  for _, list in ipairs(metas) do
+    vim.list_extend(files, list)
+  end
+  return {
+    root = root,
+    options = {},
+    label = "3 commits",
+    left = groups[1].snapshot.left,
+    right = groups[3].snapshot.right,
+    groups = groups,
+    files = files,
+  },
+    sources
+end
+
 -- The backend stub owns delivery timing, not view state. It deliberately allows
 -- canceled completions through so tests exercise the session's generation guard.
 local function backend(snapshot, sources, opts)
@@ -93,9 +174,13 @@ local function with_review(fn, options)
     initial_buffers[buf] = true
   end
   local origin_win, previous_buf = api.nvim_get_current_win(), api.nvim_get_current_buf()
+  -- Headless windows are narrow enough that the winbar sheds its title; cases
+  -- asserting on titles widen the screen before the review lays out its panes.
+  local previous_columns = vim.o.columns
+  vim.o.columns = options.columns or previous_columns
   local root = vim.fn.tempname()
   vim.fn.mkdir(root, "p")
-  local snapshot, sources = fixture(root)
+  local snapshot, sources = (options.fixture or fixture)(root)
   local control = backend(snapshot, sources, options)
   package.loaded["rill.git"] = control
   local notifications = {}
@@ -154,6 +239,7 @@ local function with_review(fn, options)
     return false
   end, 1)
   package.loaded["rill.git"], vim.notify = previous_git, previous_notify
+  vim.o.columns = previous_columns
   vim.fn.delete(root, "rf")
   if not ok then
     error(err, 0)
@@ -200,6 +286,39 @@ local function place(session, side, line, file_id)
   api.nvim_set_current_win(win)
   api.nvim_win_set_cursor(win, { at_source(session, side, line, file_id), 0 })
   session:cursor_changed(api.nvim_win_get_buf(win))
+end
+
+-- Invoke the review buffer's own mapping, as a keypress would.
+local function press(key)
+  local binding = vim.fn.maparg(key, "n", false, true)
+  H.eq("function", type(binding.callback), "expected local action for " .. key)
+  binding.callback()
+end
+
+local function buffer_lines(win)
+  return api.nvim_buf_get_lines(api.nvim_win_get_buf(win), 0, -1, false)
+end
+
+local function eval_bar(win, field)
+  return api.nvim_eval_statusline(vim.wo[win][field], {
+    winid = win,
+    use_winbar = field == "winbar",
+    maxwidth = 400,
+  }).str
+end
+
+-- Reload through the stub with a replacement snapshot delivered synchronously.
+local function refresh(session, env, snapshot)
+  session:load()
+  env.control.loads[#env.control.loads].callback(nil, snapshot)
+end
+
+local function without_files(snapshot, keep)
+  local copy = vim.deepcopy(snapshot)
+  copy.files = vim.tbl_filter(function(meta)
+    return vim.tbl_contains(keep, meta.id)
+  end, copy.files)
+  return copy
 end
 
 return {
@@ -737,5 +856,271 @@ return {
       end
       H.eq(6, #env.control.reads)
     end, { view = { syntax = true, source_cache_bytes = 0 } })
+  end,
+
+  ["view focus focuses the first file once and gf to stream survives refresh"] = function()
+    with_review(function(session, env)
+      env.control.loads[1].callback(nil, env.snapshot)
+      H.eq("first", session.focus_id)
+      H.eq(nil, session.file_rows.second)
+      H.ok(eval_bar(session.main_win, "winbar"):find("· focused", 1, true))
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq("first", session.focus_id, "refresh keeps the focused file")
+      press("<Tab>")
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq("second", session.focus_id, "focus is not re-forced onto the first file")
+      press("gf")
+      H.eq(nil, session.focus_id)
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq(nil, session.focus_id, "gf to stream must survive refresh")
+      H.ok(session.file_rows.first and session.file_rows.second)
+    end, { auto_load = false, columns = 200, view = { view = "focus" } })
+  end,
+
+  ["view focus waits through an empty comparison and focuses when changes appear"] = function()
+    with_review(function(session, env)
+      env.control.loads[1].callback(nil, without_files(env.snapshot, {}))
+      H.eq(nil, session.focus_id)
+      H.eq({ "No changes in this comparison." }, buffer_lines(session.main_win))
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq("first", session.focus_id)
+      H.eq(session.file_rows.first, api.nvim_win_get_cursor(session.main_win)[1])
+    end, { auto_load = false, view = { view = "focus" } })
+  end,
+
+  ["view focus on a single-file comparison wraps Tab to that file"] = function()
+    with_review(function(session, env)
+      env.control.loads[1].callback(nil, without_files(env.snapshot, { "second" }))
+      H.eq("second", session.focus_id)
+      press("<Tab>")
+      H.eq("second", session.focus_id)
+      press("<S-Tab>")
+      H.eq("second", session.focus_id)
+    end, { auto_load = false, view = { view = "focus" } })
+  end,
+
+  ["refresh focuses the file at the vanished file's index and streams only when empty"] = function()
+    with_review(function(session, env)
+      env.control.loads[1].callback(nil, env.snapshot)
+      H.eq(nil, session.focus_id, "the default view is the stream")
+      place(session, "new", 1, "second")
+      session:toggle_focus()
+      H.eq("second", session.focus_id)
+      refresh(session, env, without_files(env.snapshot, { "first" }))
+      H.eq("first", session.focus_id, "index 2 is clamped to the remaining file")
+      H.eq(session.file_rows.first, api.nvim_win_get_cursor(session.main_win)[1])
+      refresh(session, env, without_files(env.snapshot, { "second" }))
+      H.eq("second", session.focus_id, "the file now at index 1 takes focus")
+      refresh(session, env, without_files(env.snapshot, {}))
+      H.eq(nil, session.focus_id)
+      H.eq({ "No changes in this comparison." }, buffer_lines(session.main_win))
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq(nil, session.focus_id, "without view = focus, a later refresh stays in the stream")
+    end, { auto_load = false })
+  end,
+
+  ["public API validates view and parses commits and view flags"] = function()
+    local rill = require("rill")
+    local original, captured = view.open, nil
+    view.open = function(opts)
+      captured = opts
+    end
+    local ok, err = pcall(function()
+      local bad_ok, bad = pcall(rill.open, { view = "grid" })
+      H.eq(false, bad_ok)
+      H.ok(tostring(bad):find("Rill view must be stream or focus", 1, true), tostring(bad))
+      rill.command({ "commits", "HEAD~2", "HEAD", "--focus", "--split", "--", "lua", "doc" })
+      H.eq("commits", captured.mode)
+      H.eq({ { rev = "HEAD~2" }, { rev = "HEAD" } }, captured.commits)
+      H.eq({ "lua", "doc" }, captured.paths)
+      H.eq({ "focus", "split" }, { captured.view, captured.layout })
+      rill.command({ "--stream" })
+      H.eq({ "working", "stream" }, { captured.mode, captured.view })
+      rill.open_commits({ "a1", { rev = "b2", paths = { "x" } }, "a1" }, { paths = { "default" } })
+      H.eq({ { rev = "a1" }, { rev = "b2", paths = { "x" } } }, captured.commits, "repeated revs are dropped")
+      H.eq({ "default" }, captured.paths, "opts.paths stays the default for items without paths")
+      for _, call in ipairs({
+        function()
+          rill.open_commits({})
+        end,
+        function()
+          rill.command({ "commits", "--", "lua" })
+        end,
+        function()
+          rill.open_commits({ { paths = { "x" } } })
+        end,
+      }) do
+        H.eq(false, pcall(call), "empty or malformed commit lists must error")
+      end
+      rill.setup({ view = "focus" })
+      rill.open_working()
+      H.eq("focus", captured.view)
+      rill.open_working({ view = "stream" })
+      H.eq("stream", captured.view, "a single call overrides the configured view")
+    end)
+    view.open = original
+    rill.setup()
+    if not ok then
+      error(err, 0)
+    end
+  end,
+
+  ["commits mode renders a row per commit and reads each file from its own commit"] = function()
+    with_review(function(session, env)
+      local lines = buffer_lines(session.main_win)
+      local function row_of(text)
+        for index, line in ipairs(lines) do
+          if line == text then
+            return index
+          end
+        end
+        error("missing row: " .. text .. "\n" .. table.concat(lines, "\n"))
+      end
+      local first = row_of("● 1/3  aaaaaaaa  Add a — Ada · 03 Oct 2026 · root")
+      local empty = row_of("● 2/3  bbbbbbbb  Nothing — Ada · 03 Oct 2026")
+      local merge = row_of("● 3/3  cccccccc  Merge side — Ada · 03 Oct 2026 · merge vs 1st parent")
+      H.eq(1, first)
+      H.eq("  (no changes)", lines[empty + 1])
+      H.eq({ "group", 3 }, { session.rows[merge].kind, session.rows[merge].group })
+      H.eq(merge + 1, session.file_rows[C .. ":src/shared.lua"], "a commit's first file follows its row")
+      H.ok(session.file_rows[A .. ":src/shared.lua"], "the same path in two commits keeps two entries")
+      for _, file in ipairs(session.files) do
+        H.eq(env.snapshot.groups[file.meta.group].snapshot, file.snapshot)
+      end
+      local header = session.rows[merge]
+      H.eq(C .. ":src/shared.lua", header.file.meta.id, "a commit row resolves like its first file's header")
+      local winbar, status = eval_bar(session.main_win, "winbar"), eval_bar(session.main_win, "statusline")
+      H.ok(winbar:find("[1/3] aaaaaaaa Add a · unified · stream", 1, true), winbar)
+      H.ok(winbar:find("]C/[C commits", 1, true), winbar)
+      H.ok(status:find("3 files · 3 commits", 1, true), status)
+      place(session, "new", 1, C .. ":src/shared.lua")
+      winbar, status = eval_bar(session.main_win, "winbar"), eval_bar(session.main_win, "statusline")
+      H.ok(winbar:find("[3/3] cccccccc Merge side", 1, true), winbar)
+      H.ok(status:find("Rill · src/shared.lua", 1, true), "statusline shows the path, not the oid:path id")
+      api.nvim_win_set_cursor(session.main_win, { empty + 1, 0 })
+      session:cursor_changed(api.nvim_win_get_buf(session.main_win))
+      H.ok(eval_bar(session.main_win, "winbar"):find("[2/3] bbbbbbbb Nothing", 1, true))
+    end, { fixture = commits_fixture, columns = 200 })
+  end,
+
+  ["Tab crosses commits in focus while ]C and [C skip empty commits"] = function()
+    with_review(function(session)
+      local first, second, third = A .. ":src/a.lua", A .. ":src/shared.lua", C .. ":src/shared.lua"
+      H.eq(first, session.focus_id)
+      H.eq({ "group", 1 }, { session.rows[1].kind, session.rows[1].group })
+      H.eq(2, session.file_rows[first])
+      local visited = {}
+      for _ = 1, 3 do
+        press("<Tab>")
+        visited[#visited + 1] = session.focus_id
+        H.eq(session.focus_id, session.rows[1].file.meta.id, "focus renders the focused file's commit row")
+        H.eq(
+          1,
+          api.nvim_win_call(session.main_win, function()
+            return vim.fn.line("w0")
+          end),
+          "the commit row stays on screen"
+        )
+      end
+      H.eq({ second, third, first }, visited)
+      press("<S-Tab>")
+      H.eq(third, session.focus_id)
+      press("]C")
+      H.eq(first, session.focus_id, "]C wraps past the last commit")
+      press("]C")
+      H.eq(third, session.focus_id, "]C skips the empty commit")
+      press("[C")
+      H.eq(first, session.focus_id)
+      press("[C")
+      H.eq(third, session.focus_id, "[C wraps past the first commit")
+      H.ok(
+        eval_bar(session.main_win, "winbar"):find("[3/3] cccccccc Merge side · unified · focused", 1, true)
+      )
+      press("gf")
+      H.eq(nil, session.focus_id)
+      press("[C")
+      H.eq(first, session.current_file, "in the stream, [C moves the cursor to the commit's first file")
+      H.eq(session.file_rows[first], api.nvim_win_get_cursor(session.main_win)[1])
+    end, { fixture = commits_fixture, columns = 200, view = { view = "focus" } })
+  end,
+
+  ["context reports each commit's own revision and path"] = function()
+    with_review(function(session)
+      local function span(side, line, id)
+        return select(session, (at_source(session, side, line, id))).spans[1]
+      end
+      local added = span("new", 1, A .. ":src/a.lua")
+      H.eq({ "src/a.lua", "new", A, { "alpha" } }, { added.path, added.side, added.revision, added.lines })
+      local merged = span("new", 1, C .. ":src/shared.lua")
+      H.eq({ "src/shared.lua", C, { "two" } }, { merged.path, merged.revision, merged.lines })
+      H.eq(B, span("old", 1, C .. ":src/shared.lua").revision, "the old side is the commit's first parent")
+      local header = session.file_rows[C .. ":src/shared.lua"] - 1
+      H.eq(C .. ":src/shared.lua", select(session, header).file.id)
+      H.eq({}, select(session, header).spans)
+    end, { fixture = commits_fixture })
+  end,
+
+  ["commit tree nodes fold independently and Enter jumps to their first file"] = function()
+    with_review(function(session)
+      local function tree_lines()
+        return buffer_lines(session.tree_win)
+      end
+      H.eq({
+        "▾ 1/3 aaaaaaaa Add a",
+        "  ▾ src/",
+        "    A a.lua",
+        "    A shared.lua",
+        "▾ 2/3 bbbbbbbb Nothing",
+        "  (no changes)",
+        "▾ 3/3 cccccccc Merge side",
+        "  ▾ src/",
+        "    M shared.lua",
+      }, tree_lines())
+      api.nvim_set_current_win(session.tree_win)
+      api.nvim_win_set_cursor(session.tree_win, { 7, 0 })
+      press("<CR>")
+      H.eq(session.main_win, api.nvim_get_current_win())
+      H.eq(session.file_rows[C .. ":src/shared.lua"], api.nvim_win_get_cursor(0)[1])
+      api.nvim_set_current_win(session.tree_win)
+      api.nvim_win_set_cursor(session.tree_win, { 2, 0 })
+      press("za")
+      H.eq("  ▸ src/", tree_lines()[2])
+      H.eq("  ▾ src/", tree_lines()[6], "the same directory in another commit stays open")
+      api.nvim_win_set_cursor(session.tree_win, { 1, 0 })
+      press("za")
+      H.eq({ "▸ 1/3 aaaaaaaa Add a", "▾ 2/3 bbbbbbbb Nothing" }, vim.list_slice(tree_lines(), 1, 2))
+      H.eq(A .. ":src/a.lua", view.context({ buf = api.nvim_win_get_buf(session.tree_win), row = 1 }).file.id)
+      press("<CR>")
+      H.eq(session.file_rows[A .. ":src/a.lua"], api.nvim_win_get_cursor(session.main_win)[1])
+    end, { fixture = commits_fixture })
+  end,
+
+  ["split refresh titles the commit under the restored After cursor"] = function()
+    with_review(function(session, env)
+      env.control.loads[1].callback(nil, env.snapshot)
+      session:toggle_layout()
+      api.nvim_win_set_cursor(session.main_win, { 1, 0 })
+      place(session, "new", 1, C .. ":src/shared.lua")
+      H.eq(3, session.current_group)
+      refresh(session, env, vim.deepcopy(env.snapshot))
+      H.eq(session.right_win, session.last_code_win)
+      H.eq(3, session.current_group, "the Before pane's cursor must not retitle the review")
+      H.eq(C .. ":src/shared.lua", session.current_file)
+      H.ok(eval_bar(session.right_win, "winbar"):find("[3/3] cccccccc Merge side", 1, true))
+    end, { fixture = commits_fixture, auto_load = false, columns = 320 })
+  end,
+
+  ["jumping to a file keeps the commit row above it on screen"] = function()
+    with_review(function(session)
+      vim.wo[session.main_win].scrolloff = 0
+      local id = C .. ":src/shared.lua"
+      session:jump_file(session.by_id[id])
+      local top = api.nvim_win_call(session.main_win, function()
+        return vim.fn.line("w0")
+      end)
+      H.eq(session.file_rows[id] - 1, top)
+      H.eq("group", session.rows[top].kind)
+      H.eq(session.file_rows[id], api.nvim_win_get_cursor(session.main_win)[1])
+    end, { fixture = commits_fixture })
   end,
 }

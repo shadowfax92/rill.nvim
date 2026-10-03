@@ -89,12 +89,20 @@ function M.colors()
   -- Numbers and signs sit inside their band, so they are checked against it.
   local add = readable(color("DiagnosticOk", "fg", 0x8cab70), { luminance(band.add) })
   local del = readable(color("DiagnosticError", "fg", 0xe27878), { luminance(band.delete) })
+  -- Commit rows head a whole group of files in a multi-commit review, so they
+  -- sit on a stronger band than file headers and take the theme's Title accent.
+  local group_bg = mix(bg, fg, 0.2)
   local defs = {
     RillAdd = { bg = band.add },
     RillDelete = { bg = band.delete },
     RillAddSign = { fg = add, bg = band.add },
     RillDeleteSign = { fg = del, bg = band.delete },
     RillHeader = { fg = fg, bg = mix(bg, fg, 0.12), bold = true },
+    RillGroup = {
+      fg = readable(color("Title", "fg", fg), { luminance(group_bg) }),
+      bg = group_bg,
+      bold = true,
+    },
     RillBarKey = { fg = fg, bg = color("WinBar", "bg", bg), bold = true },
     RillBarHint = { fg = muted, bg = color("WinBar", "bg", bg) },
     RillGap = { fg = muted, bg = mix(bg, fg, 0.025) },
