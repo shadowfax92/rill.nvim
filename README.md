@@ -2,7 +2,9 @@
 
 A native Git review surface for Neovim. Read changed files in one continuous
 unified diff, switch to side-by-side with **gs**, or focus one file with **gf**.
-Layout and file focus are independent.
+Layout and file focus are independent, and `view = "focus"` opens every review
+on its first file. Several commits can be reviewed together, each against its
+own parent, in one document.
 
 Rill is a read-only review document. **Enter** opens the corresponding source:
 worktree lines open the editable file, while historical and index lines open a
@@ -44,11 +46,11 @@ Open `:Rill`: **Tab / Shift-Tab** move between files, **gs** switches layout,
 and **gf** focuses a file. The top bar keeps these actions and context/source
 shortcuts visible; **g?** opens the full key list.
 
-The companion personal Neovim configuration also supplies an asynchronous
-Telescope commit picker: `<leader>go` for the last 50 commits, `<leader>gO` for all
-ancestors of HEAD, and Tab to mark an inclusive commit range. It retains Diffview
-for history and exposes its working diff at `<leader>gV`. These global mappings
-belong to that configuration; Rill itself installs only review-buffer mappings.
+The companion personal Neovim configuration supplies asynchronous Telescope
+commit pickers (`<leader>go`, and file / folder / repository history at
+`<leader>gh`): Tab marks commits and Enter reviews every marked commit with
+`open_commits`, one section per commit. These global mappings belong to that
+configuration; Rill itself installs only review-buffer mappings.
 
 ## Comparisons
 
@@ -63,8 +65,10 @@ belong to that configuration; Rill itself installs only review-buffer mappings.
 | `:Rill A..B` | Same direct snapshot comparison |
 | `:Rill A...B` | Merge base of A and B → B |
 | `:Rill <rev>` | Shorthand for `:Rill commit <rev>` |
+| `:Rill commits <rev>...` | Each commit → its own first parent, one section per commit, in the given order |
 
-Append `--split` or `--unified` to choose the initial layout. Append
+Append `--split` or `--unified` to choose the initial layout, and `--focus` or
+`--stream` to choose the initial view. Append
 `-- path/to/file another/path` to restrict the comparison to literal repository-relative paths (files or directories).
 
 Branch mode chooses `origin/HEAD`, then local `main`, then local `master` when no
@@ -83,11 +87,12 @@ an empty-tree baseline where applicable.
 | `Enter` | Open source; expand a gap; select a tree file or directory |
 | `]f` / `[f` | Next / previous file |
 | `]c` / `[c` | Next / previous hunk |
+| `]C` / `[C` | Next / previous commit (multi-commit reviews) |
 | `zo` / `zB` | Reveal context from the top / bottom of a gap |
 | `zO` | Reveal the whole gap |
 | `zR` | Reveal the entire current file |
 | `zM` | Collapse that file's unchanged context |
-| `za` | Collapse / expand the current file's body |
+| `za` | Collapse / expand the current file's body; in the tree, fold a commit or directory |
 | `gT` | Hide / show the file tree |
 | `gw` | Toggle wrapping in unified mode |
 | `gr` | Refresh from Git |
@@ -104,6 +109,12 @@ against unchanged, added, and deleted lines; your theme's source-buffer
 highlights remain unchanged. Both layouts share this styling, which updates when
 you change colorschemes.
 
+With `view = "focus"` a review opens on its first file, and **Tab** moves to the
+next file without leaving focus. The preference applies once per review: an
+empty comparison stays in the stream until a refresh finds changes, and after
+**gf** returns to the stream, refreshes stay there. When a refresh removes the
+focused file, the file now at its position takes focus.
+
 Each file owns its context expansion. Expanding a file in the stream moves later
 files down; focusing it preserves that expansion. Split mode remains unwrapped
 so paired rows stay aligned.
@@ -112,6 +123,31 @@ Code is ordinary scratch-buffer text: motions, visual selection, `/` and `?`,
 and copying work normally. Gutter numbers and change signs are decorations.
 **Search covers materialized text only**; expand hidden context before searching
 it. The gutter shows source line numbers, which differ from review-buffer rows.
+
+## Reviewing several commits
+
+`:Rill commits A B C` or `require("rill").open_commits({ "A", "B", "C" })`
+shows each commit's own change against its first parent (a root commit against
+the empty tree), in the order given, in one review. It is not a range: commits
+between them are not included, and a change one commit makes and a later one
+reverts stays visible in both. A merge commit shows what it brought in relative
+to its first parent.
+
+Each commit's files follow a commit row:
+
+```
+● 2/3  1a2b3c4d  Subject — Author · 03 Oct 2026 · merge vs 1st parent
+```
+
+`· merge vs 1st parent` and `· root` appear where they apply. In the stream, a
+commit with no changes (in the requested paths) still gets its row, followed by
+`(no changes)`; focus skips it. A path changed by two commits appears in both
+sections. **Tab / Shift-Tab** cross commit boundaries, also in focus, and
+**]C / [C** jump to the first file of the next / previous commit with changes.
+The file tree has a foldable node per commit (`za`; Enter jumps to its first
+file), and the title names the commit under the cursor, e.g.
+`[2/3] 1a2b3c4d Subject`. Enter-to-source and Sidekick context resolve against
+that commit's own revisions.
 
 ## Sidekick
 
@@ -143,6 +179,7 @@ mappings and addresses after the review closes. No Sidekick core changes are req
 ```lua
 require("rill").setup({
   layout = "unified",
+  view = "stream", -- or "focus": open each review on its first file
   tree_width = 30,
   context_step = 20,
   wrap = false, -- unified only
@@ -163,6 +200,8 @@ rill.open_unstaged()
 rill.open_branch({ base = "origin/main" })
 rill.open_commit("HEAD~2")
 rill.open_range("main", "HEAD", { layout = "split", paths = { "src" } })
+-- One section per commit; per-commit paths override opts.paths.
+rill.open_commits({ "HEAD~2", { rev = "HEAD", paths = { "lua" } } }, { view = "focus" })
 ```
 
 Open functions return a session immediately while Git loads asynchronously.

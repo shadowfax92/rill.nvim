@@ -4,6 +4,9 @@
 local M = {}
 local defaults = {
   layout = "unified",
+  -- "focus" opens on one file (Tab/S-Tab move between files); "stream" shows
+  -- every file in one document. Either way gf toggles between the two.
+  view = "stream",
   tree_width = 30,
   context_step = 20,
   wrap = false,
@@ -29,6 +32,9 @@ function M.open(opts)
   if opts.layout ~= "unified" and opts.layout ~= "split" then
     error("Rill layout must be unified or split")
   end
+  if opts.view ~= "stream" and opts.view ~= "focus" then
+    error("Rill view must be stream or focus")
+  end
   return require("rill.view").open(opts)
 end
 
@@ -49,6 +55,37 @@ function M.open_commit(rev, opts)
 end
 function M.open_range(base, head, opts)
   return M.open(vim.tbl_extend("force", opts or {}, { mode = "range", base = base, head = head or "HEAD" }))
+end
+
+---Review each commit's own change (vs its first parent; empty tree for a root
+---commit) as one document, in the order given. Duplicates (same resolved oid)
+---are dropped, first wins. Errors (error()) on an empty list.
+---
+---This is deliberately not a range: a range nets marked commits into one diff,
+---so a change one commit makes and a later one reverts vanishes, and unmarked
+---commits in between leak in. git.lua loads one group per commit and drops
+---oid-level duplicates; identical rev strings are already dropped here.
+---@param commits (string|{ rev: string, paths?: string[] })[]
+---@param opts? table   same as M.open; opts.paths is the default for items without paths
+function M.open_commits(commits, opts)
+  local normalised, seen = {}, {}
+  for _, item in ipairs(type(commits) == "table" and commits or {}) do
+    local rev, paths = item, nil
+    if type(item) == "table" then
+      rev, paths = item.rev, item.paths
+    end
+    if type(rev) ~= "string" or rev == "" then
+      error("Rill commits must be revisions or { rev, paths } tables")
+    end
+    if not seen[rev] then
+      seen[rev] = true
+      normalised[#normalised + 1] = { rev = rev, paths = paths }
+    end
+  end
+  if #normalised == 0 then
+    error("Rill open_commits needs at least one commit")
+  end
+  return M.open(vim.tbl_extend("force", opts or {}, { mode = "commits", commits = normalised }))
 end
 
 function M.current()
@@ -93,6 +130,10 @@ function M.command(args)
       options.layout = "split"
     elseif value == "--unified" then
       options.layout = "unified"
+    elseif value == "--focus" then
+      options.view = "focus"
+    elseif value == "--stream" then
+      options.view = "stream"
     else
       positional[#positional + 1] = value
     end
@@ -112,6 +153,11 @@ function M.command(args)
       error("Usage: Rill range <base> <head> [-- paths]")
     end
     return M.open_range(positional[2], positional[3], options)
+  elseif mode == "commits" then
+    if not positional[2] then
+      error("Usage: Rill commits <rev>... [-- paths]")
+    end
+    return M.open_commits(vim.list_slice(positional, 2), options)
   end
   local base, head = mode:match("^(.-)%.%.%.(.-)$")
   if base then

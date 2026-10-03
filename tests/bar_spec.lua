@@ -1,18 +1,36 @@
 local H = require("tests.helpers")
 local Bar = require("rill.bar")
 
-local function rendered(width, layout, side)
+local function rendered(width, layout, side, commits)
   local value = Bar.render({
     width = width,
     layout = layout or "unified",
     side = side,
     title = "Before · feature%branch → HEAD · unified · stream",
     focused = false,
+    commits = commits,
   })
   return vim.api.nvim_eval_statusline(value, { use_winbar = true, maxwidth = width }).str
 end
 
 return {
+  ["commit jumps appear only in multi-commit reviews and outlive context shortcuts"] = function()
+    H.eq(nil, rendered(150):find("]C/[C", 1, true))
+    H.eq(nil, rendered(150, "split", "old"):find("]C/[C", 1, true))
+    local commits = rendered(150, "unified", nil, true)
+    H.ok(commits:find("Tab/S-Tab files  ]C/[C commits  gs split", 1, true), commits)
+    H.ok(rendered(150, "split", "old", true):find("]C/[C commits", 1, true))
+    H.eq(
+      nil,
+      rendered(150, "split", "new", true):find("]C/[C", 1, true),
+      "the After pane keeps context actions"
+    )
+    local narrow = rendered(60, "unified", nil, true)
+    H.ok(narrow:find("]C/[C commits", 1, true), narrow)
+    H.eq(nil, narrow:find("zR full file", 1, true), "context shortcuts are shed first")
+    H.ok(narrow:find("g? help", 1, true))
+  end,
+
   ["top bar keeps actions visible across layouts and narrow widths"] = function()
     local unified = rendered(150)
     for _, label in ipairs({

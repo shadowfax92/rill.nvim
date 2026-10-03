@@ -20,7 +20,13 @@ function M.render(opts)
   if opts.layout == "split" and opts.side == "new" then
     actions = { { "zo", "context" }, { "zR", "full file" }, { "Enter", "source" }, { "g?", "help" } }
   else
-    actions = { { "Tab/S-Tab", "files" }, { "gs", layout }, { "gf", focus } }
+    actions = { { "Tab/S-Tab", "files" } }
+    -- Multi-commit reviews add commit jumps right after file movement, so they
+    -- outlive the context shortcuts when a narrow pane sheds actions.
+    if opts.commits then
+      actions[#actions + 1] = { "]C/[C", "commits" }
+    end
+    vim.list_extend(actions, { { "gs", layout }, { "gf", focus } })
     if opts.layout ~= "split" then
       vim.list_extend(actions, { { "zo", "context" }, { "zR", "full file" }, { "Enter", "source" } })
     end

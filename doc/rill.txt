@@ -2,12 +2,15 @@
 
 Rill shows a continuous, read-only review of changed Git files. Unified and
 split layouts share source identities; file focus is independent of layout.
+Several commits can be reviewed together, each against its own parent.
 Requires Neovim 0.11+ and Git. Tree-sitter parsers and Sidekick are optional.
 
 CONTENTS                                                        *rill*
 
   Commands ................................................ |rill-commands|
   Review keys ............................................. |rill-keys|
+  Focus ................................................... |rill-focus|
+  Multiple commits ........................................ |rill-commits|
   Configuration ........................................... |rill-setup|
   Lua API ................................................. |rill-api|
   Integration context ..................................... |rill-context|
@@ -17,7 +20,8 @@ CONTENTS                                                        *rill*
 ==============================================================================
 COMMANDS                                                   *rill-commands*
 
-:Rill [mode/revision] [--split|--unified] [-- paths...]         *:Rill*
+:Rill [mode/revision] [--split|--unified] [--focus|--stream] [-- paths...]
+                                                                *:Rill*
 
     :Rill                         HEAD to worktree, including untracked files
     :Rill working                 Same as :Rill
@@ -29,6 +33,8 @@ COMMANDS                                                   *rill-commands*
     :Rill A..B                     Direct comparison of A and B
     :Rill A...B                    Merge base of A and B to B
     :Rill <rev>                    Same as :Rill commit <rev>
+    :Rill commits <rev>...         Each rev against its own first parent, one
+                                   section per commit (|rill-commits|)
 
     Branch mode defaults to origin/HEAD, then local main, then local master.
     Pass an explicit base for stacked branches or other upstreams. Root commits
@@ -38,12 +44,15 @@ COMMANDS                                                   *rill-commands*
 
     Worktree means files on disk, not unsaved buffer contents. "Working" is the
     net comparison against HEAD, not separate staged and unstaged sections.
-    Text after -- is treated as literal repository-relative file/directory paths. Examples: >
+    --focus and --stream choose the initial view (|rill-focus|) for this
+    review only. Text after -- is treated as literal repository-relative
+    file/directory paths. Examples: >
 
         :Rill --split -- lua tests
-        :Rill branch origin/main
+        :Rill branch origin/main --focus
         :Rill range HEAD~3 HEAD -- src/server.lua
         :Rill main...HEAD --unified
+        :Rill commits HEAD~2 HEAD -- lua
 <
 :RillClose                                                   *:RillClose*
     Close the current review tab and cancel its owned work.
@@ -69,11 +78,13 @@ All mappings below are local to Rill buffers.
     <CR>        Open source, expand gap, or select tree entry
     ]f / [f     Next / previous file
     ]c / [c     Next / previous hunk
+    ]C / [C     Next / previous commit with changes (|rill-commits|)
     zo / zB     Reveal context from the top / bottom of the current gap
     zO          Reveal the entire gap
     zR          Reveal the entire current file
     zM          Collapse current file's unchanged context
-    za          Collapse / expand the current file body
+    za          Collapse / expand the current file body; in the file tree,
+                fold the commit or directory under the cursor
     gT          Show / hide the file tree
     gw          Toggle unified wrapping (split remains unwrapped)
     gr          Refresh comparison
@@ -96,6 +107,46 @@ context is not searched until expanded. Actual buffer rows differ from source
 line numbers; integrations must use |rill-context|.
 
 ==============================================================================
+FOCUS                                                       *rill-focus*
+
+gf shows only the current file; Tab and S-Tab then move focus to the next and
+previous file, wrapping. gf again returns to the stream at the position held
+before focusing. Set view = "focus" (setup or per open call) to open reviews
+focused:
+
+  - The first load with at least one file focuses the first file. This
+    happens once per review; refreshes keep the focused file.
+  - An empty comparison stays in the stream; a later refresh that finds
+    changes still opens focused.
+  - After gf returns to the stream, refreshes stay in the stream.
+  - When a refresh removes the focused file, the file now at its position is
+    focused (for any view setting); only an empty comparison ends focus.
+
+==============================================================================
+MULTIPLE COMMITS                                            *rill-commits*
+
+:Rill commits <rev>... and |rill.open_commits()| review each commit's own
+change against its first parent (a root commit against the empty tree), in
+the given order, as one document. This is not a range: commits between the
+given ones are not shown, and a change one commit makes and a later one
+reverts stays visible in both. A merge is diffed against its first parent.
+Any unresolvable revision fails the whole review.
+
+Each commit's files follow a commit row (highlight RillGroup): >
+
+    ● 2/3  1a2b3c4d  Subject — Author · 03 Oct 2026 · merge vs 1st parent
+<
+" · merge vs 1st parent" and " · root" appear where they apply. In the stream,
+a commit without changes in the requested paths shows "(no changes)"; focus
+skips it. A path changed by two commits appears in both sections.
+
+Tab and S-Tab cross commit boundaries, also in focus. ]C and [C jump to the
+first file of the next / previous commit with changes, wrapping. The file tree
+shows one node per commit; za folds it and Enter jumps to its first file. The
+window title names the commit under the cursor, e.g. "[2/3] 1a2b3c4d Subject".
+Enter-to-source and |rill-context| use that commit's own revisions.
+
+==============================================================================
 CONFIGURATION                                               *rill-setup*
 
 With a local checkout and lazy.nvim: >lua
@@ -112,6 +163,7 @@ Defaults: >lua
 
     require("rill").setup({
       layout = "unified",                 -- "unified" or "split"
+      view = "stream",                    -- "stream" or "focus" (|rill-focus|)
       tree_width = 30,
       context_step = 20,
       wrap = false,                       -- unified only
@@ -133,7 +185,7 @@ Public highlight groups:
 
     RillAdd          RillDelete          RillAddSign      RillDeleteSign
     RillHeader       RillGap             RillMuted        RillNumber
-    RillPadding      RillTreeCurrent
+    RillPadding      RillTreeCurrent     RillGroup
 
 Rill regenerates them when a review first opens and on ColorScheme. Source syntax
 uses installed Tree-sitter capture groups, e.g. @keyword.lua. Changed lines use
@@ -161,11 +213,13 @@ asynchronously; the session owns cancellation and scratch-window cleanup. >lua
     rill.open_branch({ base = "origin/main" })
     rill.open_commit("HEAD~1", opts)
     rill.open_range("main", "HEAD", { paths = { "src" }, layout = "split" })
+    rill.open_commits({ "HEAD~2", { rev = "HEAD", paths = { "lua" } } })
 <
 All opts tables are optional. Common fields:
 
     cwd          Working directory used to locate the Git repository
     layout       "unified" or "split"
+    view         "stream" or "focus"
     paths        Array of literal repository-relative file/directory paths
     base         Base revision for branch/range
     head         Head revision for branch/range, default HEAD
@@ -174,6 +228,13 @@ All opts tables are optional. Common fields:
 open_commit() defaults its revision to HEAD. open_range(base, head, opts) requires
 base; head defaults to HEAD. Direct ranges compare snapshots, not a commit list.
 Setup options can be overridden per open call.
+
+rill.open_commits({commits}, {opts})                      *rill.open_commits()*
+    Review each commit against its own first parent, in the given order
+    (|rill-commits|). Each item is a revision string or { rev = "...",
+    paths = { ... } }; an item's paths override opts.paths, which is the
+    default for items without paths. Repeated commits are dropped, first
+    wins. Raises an error for an empty or malformed list.
 
     rill.current()   Current tab's session, or nil
     rill.toggle()    Toggle layout in current review
@@ -219,7 +280,8 @@ the current source line. The result is nil outside a loaded Rill buffer:
           path = "src/file.lua",
           absolute_path = "/absolute/repository/root/src/file.lua",
           side = "old" | "new",
-          revision = "commit hash or endpoint label",
+          revision = "commit hash or endpoint label",  -- per commit in
+                                                       -- |rill-commits|
           start_line = 143,
           end_line = 145,
           start_col = 0,

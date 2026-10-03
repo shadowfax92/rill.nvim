@@ -228,6 +228,66 @@ end })
 ]==])
   end,
 
+  ["focused multi-commit review paints its commit row on a band of its own"] = function()
+    paint([==[
+-- The composite snapshot rill.git returns for open_commits: two commits, each
+-- changing fixture.lua against its own parent.
+local function group(index, oid, subject)
+  local meta = { id = oid .. ":fixture.lua", group = index, path = "fixture.lua", status = "M",
+    additions = 1, deletions = 1,
+    patch = ("@@ -1 +1 @@\n-local value = %d\n+local value = %d\n"):format(index, index + 1) }
+  return { index = index, oid = oid, short = oid:sub(1, 8), subject = subject, author = "Ada",
+    date = "03 Oct 2026", parents = { "p" }, merge = false, root_commit = false,
+    snapshot = { root = "/tmp", label = "commit", left = { kind = "commit", rev = "p" .. index, label = "parent" },
+      right = { kind = "commit", rev = oid, label = oid }, files = { meta } } }, meta
+end
+local first, first_meta = group(1, string.rep("a", 40), "First change")
+local second, second_meta = group(2, string.rep("b", 40), "Second change")
+package.loaded["rill.git"] = {
+  load = function(_, callback)
+    vim.schedule(function()
+      callback(nil, { root = "/tmp", label = "2 commits", left = first.snapshot.left,
+        right = second.snapshot.right, groups = { first, second }, files = { first_meta, second_meta } })
+    end)
+    return function() end
+  end,
+  source = function(_, meta, side, callback)
+    local lines = { "local value = " .. (side == "old" and meta.group or meta.group + 1) }
+    vim.defer_fn(function() callback(nil, { lines = lines, text = lines[1] }) end, 50)
+    return function() end
+  end,
+}
+vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = function()
+  vim.api.nvim__inspect_cell(1, 0, 0)
+  require("rill").setup({ view = "focus", sidekick = false })
+  local review = require("rill").open()
+  painted(review, function()
+    local ok, err = xpcall(function()
+      assert(review.focus_id == first_meta.id, "view = focus must open on the first file")
+      assert(review.rows[1].kind == "group" and review.rows[2].kind == "file",
+        "focus renders the focused file's commit row above it")
+      local group_bg = vim.api.nvim_get_hl(0, { name = "RillGroup" }).bg
+      assert(group_bg and group_bg ~= vim.api.nvim_get_hl(0, { name = "RillHeader" }).bg,
+        "commit rows need a band distinct from file headers")
+      local position = vim.fn.screenpos(review.main_win, 1, 1)
+      local right = vim.fn.win_screenpos(review.main_win)[2] + vim.api.nvim_win_get_width(review.main_win) - 3
+      for _, col in ipairs({ position.col - 1, right }) do
+        local cell = vim.api.nvim__inspect_cell(1, position.row - 1, col)
+        assert(cell[2].background == group_bg, "the commit row band must span the pane")
+        assert(contrast(cell[2].foreground or 0xffffff, group_bg) >= 4.5, "commit row text is unreadable")
+      end
+      local text = {}
+      for col = position.col, position.col + 30 do
+        text[#text + 1] = vim.fn.screenstring(position.row, col)
+      end
+      assert(table.concat(text):find("● 1/2  aaaaaaaa  First change", 1, true), table.concat(text))
+    end, debug.traceback)
+    finish(ok, err)
+  end)
+end })
+]==])
+  end,
+
   ["wrapped changed lines keep their band through the gutter"] = function()
     paint([==[
 local long = "local wrapped = '" .. string.rep("abcdefghij", 40) .. "'"
