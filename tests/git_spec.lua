@@ -245,12 +245,12 @@ return {
       H.write(root, "a", { "two" })
       H.commit(root)
       local err = load_error(root, { mode = "commits", commits = { "HEAD", "no-such-rev", "HEAD~1" } })
-      H.ok(err:find("no-such-rev", 1, true), err)
+      H.eq("Not a commit: no-such-rev", err)
       err = load_error(root, { mode = "commits", commits = {} })
       H.ok(err:find("at least one commit", 1, true), err)
       local tree = H.command({ "git", "rev-parse", "HEAD^{tree}" }, root)
       err = load_error(root, { mode = "commits", commits = { { rev = tree } } })
-      H.ok(err:find(tree, 1, true), err)
+      H.eq("Not a commit: " .. tree, err)
     end)
   end,
 

@@ -390,8 +390,8 @@ local function resolve(owner, root, ref, options, done)
     root,
     { "rev-parse", "--verify", "--quiet", "--end-of-options", ref .. "^{commit}" },
     options,
-    function(err, out)
-      done(err, not err and out:gsub("\n$", "") or nil)
+    function(err, out, result)
+      done(err, not err and out:gsub("\n$", "") or nil, result)
     end
   )
 end
@@ -1020,9 +1020,14 @@ local function load_commits(owner, root, options, done)
       end)
       return
     end
-    resolve(owner, root, item.rev, options, function(err, oid)
+    resolve(owner, root, item.rev, options, function(err, oid, result)
       if err then
-        done(("Cannot resolve commit %s: %s"):format(item.rev, err))
+        -- --quiet turns "no such commit" into a silent exit 1; anything else
+        -- (timeouts, repository errors) keeps Git's own message.
+        local unknown = result and result.code == 1
+        done(
+          unknown and ("Not a commit: " .. item.rev) or ("Cannot resolve commit " .. item.rev .. ": " .. err)
+        )
         return
       end
       -- Duplicates (two names for one commit) keep their first position and paths.
