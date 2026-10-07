@@ -432,8 +432,8 @@ end
 -- Excluding the current branch ref prevents it from selecting itself;
 -- considering non-default branches is what makes stacked Grove worktrees work.
 local function branch_base(owner, root, head, options, done)
-  owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(_, name)
-    name = name and vim.trim(name) or "HEAD"
+  owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(name_err, name)
+    name = not name_err and vim.trim(name) or "HEAD"
     local function deliver(oid, label)
       local right = endpoint("worktree")
       right.branch = name

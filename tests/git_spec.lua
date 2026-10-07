@@ -516,6 +516,17 @@ return {
       H.eq("main", snapshot.left.label)
       H.eq(1, #snapshot.files)
       H.eq("dirty", snapshot.files[1].path)
+      local child = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "downstream" }, root)
+      H.write(root, "downstream", { "downstream" })
+      H.commit(root)
+      H.command({ "git", "checkout", "-q", "fresh-child" }, root)
+      H.eq(parent, load(root, { mode = "branch" }).left.rev, "downstream is not a parent")
+      H.command({ "git", "checkout", "-q", "--detach", child }, root)
+      H.eq(parent, load(root, { mode = "branch" }).left.rev, "detached alias is not a parent")
+      H.command({ "git", "checkout", "-q", "fresh-child" }, root)
+      H.command({ "git", "branch", "-f", "main", child }, root)
+      H.eq(child, load(root, { mode = "branch" }).left.rev, "main already contains this branch")
     end)
   end,
 
