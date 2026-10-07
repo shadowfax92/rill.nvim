@@ -27,7 +27,7 @@ COMMANDS                                                   *rill-commands*
     :Rill working                 Same as :Rill
     :Rill staged                  HEAD to index
     :Rill unstaged                Index to worktree, including untracked files
-    :Rill branch [base]            Merge base of base and HEAD to HEAD
+    :Rill branch [base]            Branch point to worktree (including untracked)
     :Rill commit [rev]             First parent to rev (default HEAD)
     :Rill range <base> <head>       Direct comparison of two snapshots
     :Rill A..B                     Direct comparison of A and B
@@ -36,8 +36,10 @@ COMMANDS                                                   *rill-commands*
     :Rill commits <rev>...         Each rev against its own first parent, one
                                    section per commit (|rill-commits|)
 
-    Branch mode defaults to origin/HEAD, then local main, then local master.
-    Pass an explicit base for stacked branches or other upstreams. Root commits
+    Branch mode uses the configured upstream for unpushed commits, otherwise
+    the closest local/remote branch point (including stacked parents and reflog
+    fork points). It includes staged, unstaged and untracked work. An explicit
+    base overrides detection. Save edits before reviewing disk changes. Root commits
     and unborn HEAD use an empty tree where an ordinary parent is unavailable.
     A merge commit is compared with its first parent; no combined merge UI is
     provided. Branch and revision modes exclude uncommitted changes.
@@ -96,8 +98,11 @@ file in the stream pushes later files down. On a code row, expansion finds the
 next gap in the same file; on a gap, it acts on that gap. context_step controls
 the number of lines revealed by zo, zB, and Enter on a gap.
 
-Enter opens worktree code in the originating window at its source line. Old,
-index, and historical code opens a read-only source snapshot. Selecting a file
+Enter always opens a real working file in a normal editing window. Historical
+lines map through later edits, including unsaved buffer edits. Deleted/changed
+lines use the nearest surviving line with a notice. Git renames are followed;
+deleted files produce a message and open nothing. Sidebar, terminal, help and
+floating windows are never replaced. Selecting a file
 in the sidebar jumps to it in the stream, or switches the focused file.
 
 Source text is ordinary buffer text. Normal motions, character/line/block visual
@@ -345,7 +350,7 @@ LIMITS AND OWNERSHIP                                         *rill-limits*
 
 Rill is a Git review surface. It does not stage changes, edit the review text,
 resolve merge conflicts, or store persistent review threads. Enter opens source
-for editing where the selected endpoint is a real worktree file.
+for editing after mapping the selected line to the current working file.
 
 Binary files, submodules, file-type changes, unmerged paths, and oversized changes
 remain listed with explanatory placeholders. Generated files follow the same

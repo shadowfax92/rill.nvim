@@ -1,111 +1,119 @@
---- Owns read-only historical source buffers independently of review sessions.
---- A snapshot remains addressable after its review closes; only wiping that
---- buffer releases its path/revision metadata and local integration mappings.
+--- Maps review coordinates to editable working files. Historical content stays
+--- in the review model; this module never creates a buffer or owns a window.
 local M = {}
-local addresses = {}
-local serial = 0
 
-local function uri_label(text)
-  return (text:gsub("[^%w%-%._~/]", function(character)
-    return ("%%%02X"):format(character:byte())
-  end))
+-- Git hunk starts with zero lines refer to the preceding line. Convert them to
+-- insertion boundaries before shifting unchanged regions or clamping a change.
+local function map_line(hunks, line)
+  local offset = 0
+  for _, hunk in ipairs(hunks) do
+    local a, ac, b, bc = unpack(hunk)
+    a, b = ac == 0 and a + 1 or a, bc == 0 and b + 1 or b
+    if line < a then
+      break
+    elseif ac > 0 and line < a + ac then
+      return b + math.min(line - a, math.max(0, bc - 1)), false
+    end
+    offset = b + bc - a - ac
+  end
+  return line + offset, true
 end
 
----@param content {lines: string[], text?: string, eol?: boolean, crlf?: boolean}
----@param address {root: string, path: string, side: string, revision: string, name?: string}
----@param opts? {sidekick?: boolean}
----@return integer buf
-function M.create(content, address, opts)
-  opts = opts or {}
-  local buf = vim.api.nvim_create_buf(true, true)
-  serial = serial + 1
-  vim.api.nvim_buf_set_name(
-    buf,
-    ("rill-source://%d/%s/%s"):format(serial, address.side, uri_label(address.name or address.path))
-  )
-  local lines = {}
-  for i, line in ipairs(content.lines) do
-    lines[i] = line:gsub("\r$", "")
-  end
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
-  vim.bo[buf].swapfile = false
-  vim.bo[buf].undolevels = -1
-  local crlf = content.crlf
-  if crlf == nil then
-    crlf = content.text and content.text:find("\r\n", 1, true) ~= nil
-  end
-  vim.bo[buf].fileformat = crlf and "dos" or "unix"
-  local eol = content.eol
-  if eol == nil then
-    eol = content.text and content.text:sub(-1) == "\n"
-  end
-  vim.bo[buf].endofline = eol == true
-  vim.bo[buf].fixendofline = false
-  vim.bo[buf].filetype = vim.filetype.match({ filename = address.path, buf = buf }) or ""
-  vim.bo[buf].modified = false
-  vim.bo[buf].readonly = true
-  vim.bo[buf].modifiable = false
-
-  local stored = vim.deepcopy(address)
-  stored.absolute_path = vim.fs.joinpath(stored.root, stored.path)
-  stored.line_count = #lines
-  addresses[buf] = stored
-  vim.api.nvim_create_autocmd("BufWipeout", {
-    buffer = buf,
-    once = true,
-    callback = function()
-      addresses[buf] = nil
-    end,
-  })
-  if opts.sidekick ~= false then
-    require("rill.sidekick").attach(buf)
-  end
-  return buf
-end
-
----@param ctx table Captured source-buffer position or selection.
----@return table? context Same public source-span contract as rill.context().
-function M.context(ctx)
-  local address = addresses[ctx.buf]
-  if not address or not vim.api.nvim_buf_is_valid(ctx.buf) then
-    return
-  end
-  local result = {
-    root = address.root,
-    file = { path = address.path, absolute_path = address.absolute_path },
-    spans = {},
-  }
-  local selected = require("rill.selection").rows(ctx)
-  local rows = vim.tbl_keys(selected)
-  table.sort(rows)
-  local span
-  for _, row in ipairs(rows) do
-    -- Neovim gives an empty buffer one display row. An empty Git source has no
-    -- source line 1, so it can provide a file reference but no invented span.
-    if row <= address.line_count then
-      local value = selected[row]
-      if not span or span.end_line + 1 ~= row or span.partial or value.partial then
-        span = {
-          path = address.path,
-          absolute_path = address.absolute_path,
-          side = address.side,
-          revision = address.revision,
-          start_line = row,
-          end_line = row,
-          start_col = value.start_col,
-          end_col = value.end_col,
-          lines = {},
-          partial = value.partial,
-        }
-        result.spans[#result.spans + 1] = span
+-- Context within a review hunk is exact. Runs of removed/added lines are the
+-- only approximate regions; treating the entire context-bearing hunk as changed
+-- would incorrectly warn for unchanged lines next to an edit.
+local function review_changes(file)
+  local changes = {}
+  for _, hunk in ipairs(file.hunks) do
+    local a = hunk.old_count == 0 and hunk.old_start + 1 or hunk.old_start
+    local b = hunk.new_count == 0 and hunk.new_start + 1 or hunk.new_start
+    local change
+    local function flush()
+      if change then
+        if change[2] == 0 then
+          change[1] = change[1] - 1
+        end
+        if change[4] == 0 then
+          change[3] = change[3] - 1
+        end
+        changes[#changes + 1], change = change, nil
       end
-      span.lines[#span.lines + 1] = value.text
-      span.end_line, span.end_col = row, value.end_col
+    end
+    for _, row in ipairs(hunk.rows) do
+      if row.old and row.new then
+        flush()
+      else
+        change = change or { a, 0, b, 0 }
+        if row.old then
+          change[2] = change[2] + 1
+        end
+        if row.new then
+          change[4] = change[4] + 1
+        end
+      end
+      if row.old then
+        a = a + 1
+      end
+      if row.new then
+        b = b + 1
+      end
+    end
+    flush()
+  end
+  return changes
+end
+
+---@param file table Review model with its pinned snapshot.
+---@param side 'old'|'new'
+---@param line integer
+---@param callback fun(reason: string?, location: table?)
+---@return function cancel
+function M.locate(file, side, line, callback)
+  local git, snapshot = require("rill.git"), file.snapshot
+  local cancelled, pending = false, {}
+  local exact = true
+  if side == "old" then
+    line, exact = map_line(review_changes(file), line)
+  end
+  local function finish(err, current, reviewed)
+    if cancelled then
+      return
+    end
+    if err then
+      callback(err)
+      return
+    end
+    if reviewed then
+      local hunks = vim.diff(
+        table.concat(reviewed.lines, "\n") .. "\n",
+        table.concat(current.lines, "\n") .. "\n",
+        { result_type = "indices", algorithm = "histogram", ignore_cr_at_eol = true }
+      )
+      local unchanged
+      line, unchanged = map_line(hunks, line)
+      exact = exact and unchanged
+    end
+    local clamped = math.max(1, math.min(line, #current.lines))
+    callback(nil, { path = current.path, line = clamped, exact = exact and clamped == line })
+  end
+  pending[#pending + 1] = git.working_source(snapshot, file.meta, function(err, current)
+    if cancelled then
+      return
+    end
+    if err or snapshot.right.kind == "worktree" then
+      finish(err, current)
+      return
+    end
+    pending[#pending + 1] = git.source(snapshot, file.meta, "new", function(source_err, reviewed)
+      finish(source_err, current, reviewed)
+    end)
+  end)
+  return function()
+    cancelled = true
+    for _, cancel in ipairs(pending) do
+      cancel()
     end
   end
-  return result
 end
 
 return M

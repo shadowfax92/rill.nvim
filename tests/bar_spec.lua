@@ -14,6 +14,18 @@ local function rendered(width, layout, side, commits)
 end
 
 return {
+  ["narrow titles retain their meaning with an ellipsis"] = function()
+    local value = Bar.render({
+      width = 90,
+      layout = "unified",
+      title = "Branch feat/a-very-long-feature-name vs main · commits + uncommitted",
+    })
+    local shown = vim.api.nvim_eval_statusline(value, { use_winbar = true, maxwidth = 90 }).str
+    H.ok(shown:find("Branch feat/", 1, true), shown)
+    H.ok(shown:find("…", 1, true), shown)
+    H.ok(shown:find("g? help", 1, true), shown)
+  end,
+
   ["commit jumps appear only in multi-commit reviews and outlive context shortcuts"] = function()
     H.eq(nil, rendered(150):find("]C/[C", 1, true))
     H.eq(nil, rendered(150, "split", "old"):find("]C/[C", 1, true))

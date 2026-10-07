@@ -1,6 +1,7 @@
 local H = require("tests.helpers")
 local api = vim.api
 local view = require("rill.view")
+local real_git = require("rill.git")
 
 local function fixture(root)
   local sources = {
@@ -178,10 +179,12 @@ local function with_review(fn, options)
   -- asserting on titles widen the screen before the review lays out its panes.
   local previous_columns = vim.o.columns
   vim.o.columns = options.columns or previous_columns
-  local root = vim.fn.tempname()
-  vim.fn.mkdir(root, "p")
+  local root = vim.uv.fs_realpath(H.repo())
   local snapshot, sources = (options.fixture or fixture)(root)
+  H.command({ "git", "add", "--all" }, root)
+  H.command({ "git", "commit", "--allow-empty", "-qm", "fixture" }, root)
   local control = backend(snapshot, sources, options)
+  control.working_source = real_git.working_source
   package.loaded["rill.git"] = control
   local notifications = {}
   vim.notify = function(message)
@@ -647,27 +650,105 @@ return {
     end, { auto_load = false })
   end,
 
-  ["historical source opening preserves unsaved user buffers and requested source line"] = function()
+  ["commit Enter opens the real editable file at an identical line"] = function()
     with_review(function(session, env)
+      env.snapshot.right = { kind = "commit", rev = "HEAD", label = "HEAD" }
+      place(session, "new", 4)
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_win() == env.origin_win
+      end, 1))
+      H.eq(env.root .. "/src/new name.lua", api.nvim_buf_get_name(0))
+      H.eq("", vim.bo.buftype)
+      H.eq(4, api.nvim_win_get_cursor(0)[1])
+      H.eq({ "unsaved work", "keep me" }, api.nvim_buf_get_lines(env.origin_buf, 0, -1, false))
+    end)
+  end,
+
+  ["commit Enter maps insertions and uses modified buffer content"] = function()
+    for _, unsaved in ipairs({ false, true }) do
+      with_review(function(session, env)
+        env.snapshot.right = { kind = "commit", rev = "HEAD", label = "HEAD" }
+        local path = env.root .. "/src/new name.lua"
+        local lines = vim.deepcopy(env.sources.first.new)
+        table.insert(lines, 1, "inserted")
+        if unsaved then
+          local buf = vim.fn.bufadd(path)
+          vim.fn.bufload(buf)
+          api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        else
+          H.write(env.root, "src/new name.lua", lines)
+        end
+        place(session, "new", 4)
+        session:open_source()
+        H.ok(vim.wait(1000, function()
+          return api.nvim_get_current_win() == env.origin_win
+        end, 1))
+        H.eq(path, api.nvim_buf_get_name(0))
+        H.eq(5, api.nvim_win_get_cursor(0)[1])
+        H.eq({}, env.notifications, "unchanged text shifts exactly")
+      end)
+    end
+  end,
+
+  ["changed and deleted lines open their nearest surviving working line"] = function()
+    with_review(function(session, env)
+      env.snapshot.right = { kind = "commit", rev = "HEAD", label = "HEAD" }
+      H.write(env.root, "src/new name.lua", { "first", "second", "third", "edited", "same tail" })
+      place(session, "new", 4)
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_win() == env.origin_win
+      end, 1))
+      H.eq(4, api.nvim_win_get_cursor(0)[1])
+      H.ok(env.notifications[1]:find("nearest line", 1, true))
       place(session, "old", 5)
       session:open_source()
       H.ok(vim.wait(1000, function()
         return api.nvim_get_current_win() == env.origin_win
       end, 1))
-      local historical = api.nvim_get_current_buf()
-      H.eq(env.sources.first.old, api.nvim_buf_get_lines(historical, 0, -1, false))
-      H.eq(false, vim.bo[historical].modifiable)
-      H.eq(5, api.nvim_win_get_cursor(0)[1])
-      H.eq({ "unsaved work", "keep me" }, api.nvim_buf_get_lines(env.origin_buf, 0, -1, false))
-      H.eq(true, vim.bo[env.origin_buf].modified)
-      H.ok(api.nvim_tabpage_is_valid(session.tab))
-      session:close()
-      H.eq(true, api.nvim_buf_is_valid(historical))
-      H.eq(historical, api.nvim_win_get_buf(env.origin_win))
-      H.eq(
-        { { "src/old name.lua", "old", "deadbeef", 5, 5, { "removed extra" } } },
-        span_locations(view.context({ buf = historical, win = env.origin_win, row = 5, col = 1 }))
-      )
+      H.eq(env.root .. "/src/new name.lua", api.nvim_buf_get_name(0))
+      H.eq(4, api.nvim_win_get_cursor(0)[1])
+    end)
+  end,
+
+  ["Enter follows a Git rename and refuses a file deleted since review"] = function()
+    with_review(function(session, env)
+      env.snapshot.right = { kind = "commit", rev = "HEAD", label = "HEAD" }
+      H.command({ "git", "mv", "src/new name.lua", "src/renamed.lua" }, env.root)
+      place(session, "new", 4)
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_win() == env.origin_win
+      end, 1))
+      H.eq(env.root .. "/src/renamed.lua", api.nvim_buf_get_name(0))
+      H.eq(4, api.nvim_win_get_cursor(0)[1])
+      H.command({ "git", "rm", "-f", "src/renamed.lua" }, env.root)
+      place(session, "new", 4)
+      local review = api.nvim_get_current_buf()
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return #env.notifications > 0
+      end, 1))
+      H.eq(review, api.nvim_get_current_buf())
+      H.ok(env.notifications[1]:find("was deleted after HEAD", 1, true))
+    end)
+  end,
+
+  ["Enter leaves special origin windows intact and session names use integer ids"] = function()
+    with_review(function(session, env)
+      vim.bo[env.origin_buf].buftype = "nofile"
+      vim.bo[env.origin_buf].filetype = "NvimTree"
+      H.ok(session.id:match("^%d+$"), session.id)
+      place(session, "new", 4)
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/src/new name.lua"
+      end, 1))
+      H.ok(api.nvim_get_current_win() ~= env.origin_win)
+      H.eq(env.origin_buf, api.nvim_win_get_buf(env.origin_win))
+      H.eq("", vim.bo.buftype)
+      vim.cmd("tabclose!")
     end)
   end,
 
@@ -678,30 +759,12 @@ return {
       vim.fn.bufload(expected)
       place(session, "new", 5)
       session:open_source()
-      H.eq(env.origin_win, api.nvim_get_current_win())
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_win() == env.origin_win
+      end, 1))
       H.eq(expected, api.nvim_get_current_buf())
       H.eq(true, vim.bo[expected].modifiable)
       H.eq(5, api.nvim_win_get_cursor(0)[1])
-      H.eq({ "unsaved work", "keep me" }, api.nvim_buf_get_lines(env.origin_buf, 0, -1, false))
-    end)
-  end,
-
-  ["repeated historical source opening reuses a valid snapshot without name collisions"] = function()
-    with_review(function(session, env)
-      place(session, "old", 4)
-      session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
-      local initial = api.nvim_get_current_buf()
-      place(session, "old", 5)
-      session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
-      H.eq(env.sources.first.old, api.nvim_buf_get_lines(api.nvim_get_current_buf(), 0, -1, false))
-      H.eq(5, api.nvim_win_get_cursor(0)[1])
-      H.ok(api.nvim_get_current_buf() == initial or not api.nvim_buf_is_valid(initial))
     end)
   end,
 

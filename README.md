@@ -6,9 +6,10 @@ Layout and file focus are independent, and `view = "focus"` opens every review
 on its first file. Several commits can be reviewed together, each against its
 own parent, in one document.
 
-Rill is a read-only review document. **Enter** opens the corresponding source:
-worktree lines open the editable file, while historical and index lines open a
-read-only snapshot. Source paths, revisions, and line numbers stay attached to
+Rill is a read-only review document. **Enter** always opens the real working file in a normal editing window.
+Historical lines are mapped through later edits (including unsaved buffer edits);
+changed or deleted lines use the nearest surviving line with a brief notice.
+Git renames are followed; deleted files produce a message and open nothing. Source paths, revisions, and line numbers stay attached to
 the code across layout changes, context expansion, and Sidekick selections.
 
 Requires **Neovim 0.11+** and **Git**. There are no required Lua dependencies.
@@ -28,7 +29,7 @@ return {
     opts = {},
     keys = {
       { "<leader>gd", "<cmd>Rill<cr>", desc = "Review working changes" },
-      { "<leader>gD", "<cmd>Rill branch<cr>", desc = "Review branch changes" },
+      { "<leader>gb", "<cmd>Rill branch<cr>", desc = "Review branch changes" },
     },
   },
 }
@@ -59,7 +60,7 @@ configuration; Rill itself installs only review-buffer mappings.
 | `:Rill` or `:Rill working` | HEAD → files on disk, including untracked files |
 | `:Rill staged` | HEAD → index |
 | `:Rill unstaged` | Index → files on disk, including untracked files |
-| `:Rill branch [base]` | Merge base of base and HEAD → HEAD |
+| `:Rill branch [base]` | Branch point → working tree, including untracked files |
 | `:Rill commit [rev]` | First parent → commit; defaults to HEAD |
 | `:Rill range <base> <head>` | Base snapshot → head snapshot |
 | `:Rill A..B` | Same direct snapshot comparison |
@@ -71,10 +72,11 @@ Append `--split` or `--unified` to choose the initial layout, and `--focus` or
 `--stream` to choose the initial view. Append
 `-- path/to/file another/path` to restrict the comparison to literal repository-relative paths (files or directories).
 
-Branch mode chooses `origin/HEAD`, then local `main`, then local `master` when no
-base is supplied. Specify a base for stacked branches or another upstream.
-Branch and revision comparisons exclude uncommitted work. Working comparisons
-read disk, so save buffer edits first. Root commits and unborn repositories use
+Branch mode uses the upstream when configured (unpushed commits plus uncommitted
+work). Otherwise it finds the closest branch point among local/remote branches
+and reflog fork points, including stacked parents. An explicit base overrides
+automatic detection. Branch and working comparisons read disk, so save buffer
+edits before reviewing them. Revision comparisons remain pinned to commits. Root commits and unborn repositories use
 an empty-tree baseline where applicable.
 
 ## Reviewing
@@ -171,8 +173,8 @@ new revision or worktree/index side. Mixed selections become separate spans for
 each file, side, and contiguous range. Headers, gaps, and split padding do not
 invent source locations. Code and locations are captured before the comment
 popup opens, keeping its preview, draft, and eventual message consistent even if
-the review refreshes. Historical source buffers opened with Enter retain these
-mappings and addresses after the review closes. No Sidekick core changes are required.
+the review refreshes. Enter returns to ordinary editing and its normal Sidekick mappings;
+review selections retain their historical addresses. No Sidekick core changes are required.
 
 ## Configuration and API
 
