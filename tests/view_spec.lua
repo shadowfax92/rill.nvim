@@ -752,6 +752,41 @@ return {
     end)
   end,
 
+  ["Enter reloads an unmodified stale buffer before mapping historical lines"] = function()
+    with_review(function(session, env)
+      env.snapshot.right = { kind = "commit", rev = "HEAD", label = "HEAD" }
+      local path = env.root .. "/src/new name.lua"
+      local buf = vim.fn.bufadd(path)
+      vim.fn.bufload(buf)
+      api.nvim_buf_set_lines(buf, 0, -1, false, { "stale" })
+      vim.bo[buf].modified = false
+      local lines = vim.deepcopy(env.sources.first.new)
+      table.insert(lines, 1, "inserted externally")
+      H.write(env.root, "src/new name.lua", lines)
+      place(session, "new", 4)
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_win() == env.origin_win
+      end, 1))
+      H.eq(5, api.nvim_win_get_cursor(0)[1])
+      H.eq("replacement β", api.nvim_get_current_line())
+      H.eq(false, vim.bo.modified)
+    end)
+  end,
+
+  ["working Enter opens files exceeding review expansion limits"] = function()
+    with_review(function(session, env)
+      env.snapshot.options = { max_file_bytes = 1, max_source_lines = 1 }
+      place(session, "new", 4)
+      session:open_source()
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_win() == env.origin_win
+      end, 1))
+      H.eq(env.root .. "/src/new name.lua", api.nvim_buf_get_name(0))
+      H.eq(4, api.nvim_win_get_cursor(0)[1])
+    end)
+  end,
+
   ["worktree source opening uses the existing editable buffer"] = function()
     with_review(function(session, env)
       local path = env.root .. "/src/new name.lua"

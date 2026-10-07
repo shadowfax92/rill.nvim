@@ -1323,6 +1323,11 @@ function Session:open_source()
     vim.fn.bufload(buf)
     vim.bo[buf].buflisted = true
     api.nvim_win_set_buf(0, buf)
+    -- BufEnter hooks or an edit during the asynchronous Git read can change
+    -- the destination again; never publish a cursor outside the actual buffer.
+    local target_line = math.max(1, math.min(location.line, api.nvim_buf_line_count(buf)))
+    location.exact = location.exact and target_line == location.line
+    location.line = target_line
     local text = api.nvim_buf_get_lines(buf, location.line - 1, location.line, false)[1] or ""
     api.nvim_win_set_cursor(0, { location.line, math.min(column, #text) })
     vim.cmd("normal! zz")

@@ -42,7 +42,7 @@ COMMANDS                                                   *rill-commands*
     base overrides detection. Save edits before reviewing disk changes. Root commits
     and unborn HEAD use an empty tree where an ordinary parent is unavailable.
     A merge commit is compared with its first parent; no combined merge UI is
-    provided. Branch and revision modes exclude uncommitted changes.
+    provided. Revision modes exclude uncommitted changes.
 
     Worktree means files on disk, not unsaved buffer contents. "Working" is the
     net comparison against HEAD, not separate staged and unstaged sections.

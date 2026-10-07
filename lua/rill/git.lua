@@ -429,7 +429,7 @@ end
 
 -- An upstream defines "unpushed" directly. Otherwise compare all local/remote
 -- parents and reflog fork points, retaining the closest ancestor of HEAD.
--- Excluding the current branch and descendant tips prevents an empty review;
+-- Excluding the current branch ref prevents it from selecting itself;
 -- considering non-default branches is what makes stacked Grove worktrees work.
 local function branch_base(owner, root, head, options, done)
   owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(_, name)
@@ -448,15 +448,27 @@ local function branch_base(owner, root, head, options, done)
       end
       owner:run(
         root,
-        { "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes" },
+        { "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/heads", "refs/remotes" },
         options,
         function(ref_err, output)
           if ref_err then
             done(ref_err)
             return
           end
-          local refs = vim.split(output, "\n", { trimempty = true })
-          local best, best_label, fallback
+          local refs, tips, defaults = {}, {}, {}
+          for record in output:gmatch("[^\n]+") do
+            local ref, tip, symref = record:match("^(%S+) (%S+) ?(.*)$")
+            refs[#refs + 1], tips[ref] = ref, tip
+            if ref == "refs/remotes/origin/HEAD" and symref ~= "" then
+              defaults[symref] = true
+              defaults[symref:gsub("^refs/remotes/origin/", "refs/heads/")] = true
+            end
+            if ref:match("/main$") or ref:match("/master$") then
+              defaults[ref] = true
+            end
+          end
+          local best, best_label
+          local fallback = name == "HEAD" and "HEAD" or nil
           local i = 0
           local function next_ref()
             i = i + 1
@@ -480,7 +492,10 @@ local function branch_base(owner, root, head, options, done)
             end
             local label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
             local function consider(oid, complete)
-              if not oid or oid == head then
+              -- A detached HEAD's own branch alias is not its parent. Nor is
+              -- a downstream feature branch; default branches may contain HEAD
+              -- after it was merged, and must still yield an empty committed diff.
+              if not oid or (oid == head and not defaults[ref] and (name == "HEAD" or tips[ref] ~= head)) then
                 complete()
                 return
               end
@@ -1051,9 +1066,7 @@ local function load_commits(owner, root, options, done)
         group.snapshot = {
           root = root,
           options = group_options,
-          label = options.mode == "working" and "Uncommitted vs " .. left.label
-            or options.mode == "branch" and ("Branch " .. (right.branch or "HEAD") .. " vs " .. left.label .. " · commits + uncommitted")
-            or left.label .. " → " .. right.label,
+          label = left.label .. " → " .. right.label,
           left = left,
           right = right,
           files = metas,
@@ -1262,31 +1275,25 @@ function M.working_source(snapshot, meta, callback)
       owner:finish(meta.path .. " was deleted after " .. revision)
       return
     end
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if
-        vim.api.nvim_buf_is_loaded(buf)
-        and vim.bo[buf].buftype == ""
-        and vim.bo[buf].modified
-        and (
-          vim.api.nvim_buf_get_name(buf) == absolute
-          or uv.fs_realpath(vim.api.nvim_buf_get_name(buf)) == uv.fs_realpath(absolute)
-        )
-      then
-        owner:finish(nil, { path = absolute, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) })
-        return
+    -- This is an editing destination, not a review expansion: Neovim must be
+    -- allowed to load it even when it exceeds the review's source budgets.
+    -- Reload only unmodified buffers so mapping and the eventual window use the
+    -- same disk content. bufload alone leaves already-loaded stale text intact.
+    local buf = vim.fn.bufadd(absolute)
+    local loaded = vim.api.nvim_buf_is_loaded(buf)
+    local ok, err = pcall(function()
+      vim.fn.bufload(buf)
+      if loaded and not vim.bo[buf].modified then
+        vim.api.nvim_buf_call(buf, function()
+          vim.cmd("silent keepalt edit")
+        end)
       end
-    end
-    read_file(owner, absolute, options.max_file_bytes, function(err, text)
-      if err then
-        owner:finish(err)
-        return
-      end
-      local value, source_err = source_value(text, "worktree", path, options)
-      if value then
-        value.path = absolute
-      end
-      owner:finish(source_err, value)
     end)
+    if not ok then
+      owner:finish(tostring(err))
+      return
+    end
+    owner:finish(nil, { path = absolute, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) })
   end
   if snapshot.right.kind == "worktree" then
     read()

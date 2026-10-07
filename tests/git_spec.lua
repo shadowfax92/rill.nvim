@@ -502,6 +502,23 @@ return {
     end)
   end,
 
+  fresh_branch_does_not_include_its_parents_unpushed_commits = function()
+    fixture(function(root)
+      H.write(root, "base", { "base" })
+      local base = H.commit(root)
+      H.command({ "git", "update-ref", "refs/remotes/origin/main", base }, root)
+      H.write(root, "parent", { "parent" })
+      local parent = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "fresh-child" }, root)
+      H.write(root, "dirty", { "dirty" })
+      local snapshot = load(root, { mode = "branch" })
+      H.eq(parent, snapshot.left.rev)
+      H.eq("main", snapshot.left.label)
+      H.eq(1, #snapshot.files)
+      H.eq("dirty", snapshot.files[1].path)
+    end)
+  end,
+
   commit_mode_uses_first_parent_for_merges = function()
     fixture(function(root)
       H.write(root, "base", { "one" })
