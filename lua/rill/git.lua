@@ -441,7 +441,12 @@ local function branch_base(owner, root, head, options, done)
     end
     owner:run(
       root,
-      { "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/heads", "refs/remotes" },
+      {
+        "for-each-ref",
+        "--format=%(refname) %(objectname) %(symref) %(upstream)",
+        "refs/heads",
+        "refs/remotes",
+      },
       options,
       function(ref_err, output)
         if ref_err then
@@ -449,12 +454,17 @@ local function branch_base(owner, root, head, options, done)
           return
         end
         local refs, tips, branches, names = {}, {}, {}, {}
-        local trunk
+        local trunk, tracking
         for record in output:gmatch("[^\n]+") do
-          local ref, tip, symref = record:match("^(%S+) (%S+) ?(.*)$")
+          local ref, tip, symref, upstream = record:match("^(%S+) (%S+) (%S*) (%S*)$")
           local branch = ref:match("^refs/heads/(.+)$") or ref:match("^refs/remotes/[^/]+/(.+)$")
           refs[#refs + 1], tips[ref], branches[ref] = ref, tip, branch
-          names[branch] = true
+          if branch then
+            names[branch] = true
+          end
+          if ref == "refs/heads/" .. name and upstream ~= "" then
+            tracking = upstream
+          end
           if ref == "refs/remotes/origin/HEAD" and symref ~= "" then
             trunk = symref:match("^refs/remotes/origin/(.+)$")
           end
@@ -478,7 +488,11 @@ local function branch_base(owner, root, head, options, done)
             end
             return
           end
-          if branches[ref] == name or ref:match("/HEAD$") then
+          -- A rename or an explicit push refspec can give the published copy
+          -- a different name. Remote tracking identifies that copy; local
+          -- upstreams are stacked parents, and trunk remains a base candidate.
+          local published = ref == tracking and ref:match("^refs/remotes/") and branches[ref] ~= trunk
+          if branches[ref] == name or published or ref:match("/HEAD$") then
             if ref == "refs/heads/" .. name then
               fallback = name
             end

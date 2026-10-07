@@ -78,7 +78,7 @@ Append `--split` or `--unified` to choose the initial layout, and `--focus` or
 Branch mode reviews the whole feature branch, including pushed commits and
 uncommitted work. It finds the closest branch point among other local/remote
 branches and reflog fork points, including stacked parents; the current branch
-and its same-named remote copies are excluded. Only trunk itself (the branch
+and its published remote tracking ref (plus same-named remote copies) are excluded. Only trunk itself (the branch
 named by `origin/HEAD`, otherwise `main` or `master`) uses its configured upstream
 to show unpushed commits plus uncommitted work. An explicit base overrides
 automatic detection. Branch and working comparisons read disk, so save buffer

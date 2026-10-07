@@ -1364,8 +1364,11 @@ function Session:open_source()
         vim.bo[previous].buflisted = false
       end
     else
-      -- Split directly onto the file, avoiding tabnew's extra listed buffer.
-      vim.cmd("tab sbuffer " .. buf)
+      -- Splitting the current buffer creates no empty buffer. Then install the
+      -- source explicitly: :tab sbuffer honors switchbuf and could jump back
+      -- into a sidebar/preview window that the destination checks rejected.
+      vim.cmd("tab split")
+      api.nvim_win_set_buf(0, buf)
     end
     -- BufEnter hooks or an edit during the asynchronous Git read can change
     -- the destination again; never publish a cursor outside the actual buffer.

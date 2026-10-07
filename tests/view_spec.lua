@@ -205,7 +205,7 @@ local function with_review(fn, options)
   local origin_win, previous_buf = api.nvim_get_current_win(), api.nvim_get_current_buf()
   -- Headless windows are narrow enough that the winbar sheds its title; cases
   -- asserting on titles widen the screen before the review lays out its panes.
-  local previous_columns = vim.o.columns
+  local previous_columns, previous_switchbuf = vim.o.columns, vim.o.switchbuf
   vim.o.columns = options.columns or previous_columns
   local root = vim.uv.fs_realpath(H.repo())
   local snapshot, sources = (options.fixture or fixture)(root)
@@ -233,7 +233,7 @@ local function with_review(fn, options)
       api.nvim_set_option_value(key, value, { win = origin_win, scope = "local" })
     end
     if options.prepare_origin then
-      options.prepare_origin(origin_win, origin_buf)
+      options.prepare_origin(origin_win, origin_buf, root)
     end
     local unnamed_before = listed_unnamed()
     session = view.open(vim.tbl_extend("force", {
@@ -289,7 +289,7 @@ local function with_review(fn, options)
     return false
   end, 1)
   package.loaded["rill.git"], vim.notify = previous_git, previous_notify
-  vim.o.columns = previous_columns
+  vim.o.columns, vim.o.switchbuf = previous_columns, previous_switchbuf
   vim.fn.delete(root, "rf")
   if not ok then
     error(err, 0)
@@ -847,6 +847,32 @@ return {
       prepare_origin = function(win, buf)
         vim.bo[buf].buftype = "nofile"
         vim.bo[buf].filetype = "NvimTree"
+        api.nvim_set_option_value("winfixwidth", true, { win = win, scope = "local" })
+      end,
+    })
+  end,
+
+  ["Enter cannot use switchbuf to revisit a rejected fixed-width source window"] = function()
+    with_review(function(session, env)
+      vim.o.switchbuf = "useopen,usetab"
+      local tabs = #api.nvim_list_tabpages()
+      place(session, "new", 4)
+      press("<CR>")
+      H.ok(vim.wait(1000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/src/new name.lua"
+      end, 1))
+      H.eq(tabs + 1, #api.nvim_list_tabpages())
+      H.ok(api.nvim_get_current_win() ~= env.origin_win)
+      assert_editor_options(api.nvim_get_current_win())
+      H.eq(env.origin_buf, api.nvim_win_get_buf(env.origin_win))
+      H.eq(env.unnamed_before, listed_unnamed())
+      H.eq("useopen,usetab", vim.o.switchbuf)
+      vim.cmd("tabclose!")
+    end, {
+      window_options = editor_options,
+      prepare_origin = function(win, buf, root)
+        api.nvim_buf_set_name(buf, root .. "/src/new name.lua")
+        vim.bo[buf].modified = false
         api.nvim_set_option_value("winfixwidth", true, { win = win, scope = "local" })
       end,
     })

@@ -517,6 +517,30 @@ return {
     end)
   end,
 
+  branch_review_ignores_differently_named_published_upstreams = function()
+    for _, renamed in ipairs({ false, true }) do
+      fixture(function(root)
+        H.write(root, "base", { "base" })
+        local base = H.commit(root)
+        publish_trunk(root, "main")
+        H.command({ "git", "checkout", "-qb", "feature" }, root)
+        H.write(root, "pushed", { "pushed" })
+        H.commit(root)
+        H.command({ "git", "push", "-qu", "origin", renamed and "feature" or "HEAD:published" }, root)
+        if renamed then
+          H.command({ "git", "branch", "-m", "renamed" }, root)
+        end
+        H.write(root, "unpushed", { "unpushed" })
+        H.commit(root)
+        H.write(root, "base", { "dirty" })
+        local snapshot = load(root, { mode = "branch" })
+        H.eq(base, snapshot.left.rev)
+        H.eq("main", snapshot.left.label)
+        H.eq({ "base", "pushed", "unpushed" }, paths(snapshot.files))
+      end)
+    end
+  end,
+
   branch_review_keeps_pushed_stacked_commits_against_local_or_remote_parent = function()
     fixture(function(root)
       H.write(root, "base", { "base" })

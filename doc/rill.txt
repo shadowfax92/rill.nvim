@@ -38,7 +38,8 @@ COMMANDS                                                   *rill-commands*
 
     Branch mode includes pushed feature commits, using the closest branch point
     among other local/remote branches (including stacked parents and reflog fork
-    points). It excludes the current branch and its same-named remote copies.
+    points). It excludes the current branch, its published remote tracking ref
+    and same-named remote copies.
     Only trunk itself (origin/HEAD's branch, otherwise main or master) uses its
     configured upstream to show unpushed commits. Both include staged, unstaged
     and untracked work. An explicit base overrides detection. Save edits before
