@@ -228,9 +228,13 @@ function Tree:buffer()
       end,
     },
     za = {
-      "Toggle directory / commit",
+      "Toggle directory / commit / file body",
       function()
-        self:toggle()
+        if self.on_toggle then
+          self.on_toggle(self:selected())
+        else
+          self:toggle()
+        end
       end,
     },
     q = {
@@ -302,7 +306,19 @@ end
 function Tree:close()
   self:capture_width()
   if self:is_open() then
-    api.nvim_win_close(self.win, true)
+    local tab = api.nvim_win_get_tabpage(self.win)
+    local ordinary = vim.tbl_filter(function(win)
+      return api.nvim_win_get_config(win).relative == ""
+    end, api.nvim_tabpage_list_wins(tab))
+    if #api.nvim_list_tabpages() == 1 and #ordinary == 1 then
+      -- :only/:tabonly can remove the document before scheduled session
+      -- cleanup runs. Neovim requires one ordinary window; hand it back to
+      -- editing before deleting the panel, including its window-only size lock.
+      api.nvim_win_set_buf(self.win, api.nvim_create_buf(true, false))
+      api.nvim_set_option_value("winfixwidth", false, { win = self.win, scope = "local" })
+    else
+      api.nvim_win_close(self.win, true)
+    end
   end
   self.win = nil
 end
@@ -312,7 +328,9 @@ function Tree:dispose()
     return
   end
   self.disposed = true
-  self:close()
+  -- A third-party window-close hook must not prevent registry, augroup and
+  -- scratch-buffer cleanup. The session may already be marked closed.
+  local closed, close_error = pcall(self.close, self)
   if valid(self.help_win) then
     api.nvim_win_close(self.help_win, true)
   end
@@ -322,8 +340,11 @@ function Tree:dispose()
       self.detach(self.buf)
     end
     if api.nvim_buf_is_valid(self.buf) then
-      api.nvim_buf_delete(self.buf, { force = true })
+      pcall(api.nvim_buf_delete, self.buf, { force = true })
     end
+  end
+  if not closed then
+    vim.notify("Rill Files cleanup: " .. tostring(close_error), vim.log.levels.WARN)
   end
 end
 
@@ -400,7 +421,13 @@ function Tree:render()
       prior
       and (
         (entry.key and prior.key == entry.key)
-        or (not entry.group and entry.file and prior.file and prior.file.meta.id == entry.file.meta.id)
+        or (
+          not prior.key
+          and not entry.group
+          and entry.file
+          and prior.file
+          and prior.file.meta.id == entry.file.meta.id
+        )
       )
     then
       cursor = index
@@ -500,7 +527,7 @@ function Tree:help()
     "",
     "Enter / o / l  Open file / expand directory",
     "h              Collapse / parent",
-    "za             Toggle directory / commit",
+    "za             Toggle directory / commit / file body",
     "> / <          Widen / narrow (session-persistent)",
     "Ctrl-w < / >   Native resize; separator drag also works",
     "q              Close Files panel",
@@ -556,6 +583,7 @@ function M.new(opts)
     options = options,
     initial_width = math.floor(opts.initial_width or 30),
     on_select = opts.on_select,
+    on_toggle = opts.on_toggle,
     attach = opts.attach,
     detach = opts.detach,
     data = {},

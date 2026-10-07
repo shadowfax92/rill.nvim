@@ -118,7 +118,8 @@ file icons from an available MiniIcons/devicons provider (plain fallback), and
 colored Git status glyphs. Long entries use ellipses, preserving filenames ahead
 of directory indentation; commit rows retain their short SHA before the subject.
 **Enter / o / l** select files or expand directories, **h** collapses or moves to
-the parent, **za** folds directories/commits, and **g?** shows the panel keys.
+the parent, **za** folds directories/commits or the selected file body, and
+**g?** shows the panel keys.
 Existing review and Sidekick keys still work there; **gT** reopens a closed panel.
 
 `tree_width` remains the initial width and the minimum used for automatic

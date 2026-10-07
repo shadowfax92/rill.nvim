@@ -896,6 +896,45 @@ return {
     end, { columns = 160 })
   end,
 
+  ["Files za retains the existing file-body fold action"] = function()
+    with_review(function(session)
+      for index, entry in ipairs(session.tree.entries) do
+        if entry.file and not entry.group and entry.file.meta.id == "first" then
+          api.nvim_set_current_win(session.tree.win)
+          api.nvim_win_set_cursor(session.tree.win, { index, 0 })
+          break
+        end
+      end
+      press("za")
+      H.eq(true, session.collapsed.first)
+      for _, row in ipairs(session.rows) do
+        H.ok(not (row.kind == "code" and row.file.meta.id == "first"), "folded body must disappear")
+      end
+      press("za")
+      H.eq(false, session.collapsed.first)
+      H.ok(at_source(session, "new", 4))
+    end)
+  end,
+
+  ["cleanup completes when Files is the last window in the last tab"] = function()
+    with_review(function(session)
+      local buf, group = session.tree.buf, session.tree.augroup
+      vim.cmd("tabonly!")
+      api.nvim_set_current_win(session.tree.win)
+      vim.cmd("only!")
+      H.ok(vim.wait(1000, function()
+        return session.closed
+      end, 1))
+      H.eq(nil, view.buffers[buf])
+      H.eq(false, api.nvim_buf_is_valid(buf))
+      H.eq(false, pcall(api.nvim_get_autocmds, { group = group }))
+      H.eq(1, #api.nvim_list_wins())
+      H.eq("", vim.bo.buftype)
+      H.eq(false, vim.wo.winfixwidth)
+      assert_editor_options(api.nvim_get_current_win())
+    end, { window_options = editor_options })
+  end,
+
   ["closing the last review tab leaves a normal editing window"] = function()
     with_review(function(session)
       vim.cmd("tabonly!")
@@ -1294,7 +1333,7 @@ return {
       press("[C")
       H.eq(first, session.current_file, "in the stream, [C moves the cursor to the commit's first file")
       H.eq(session.file_rows[first], api.nvim_win_get_cursor(session.main_win)[1])
-    end, { fixture = commits_fixture, columns = 200, view = { view = "focus" } })
+    end, { fixture = commits_fixture, columns = 240, view = { view = "focus" } })
   end,
 
   ["context reports each commit's own revision and path"] = function()

@@ -123,8 +123,8 @@ Files has no number/sign columns. Folder folds, indent markers, optional file
 icons (MiniIcons or nvim-web-devicons) and colored Git status glyphs distinguish
 entries. Truncation uses ellipses and preserves filenames before indentation;
 commit headings retain the short SHA. Enter/o/l select files or expand folders;
-h collapses or moves to the parent; za folds a folder/commit; q closes only the
-panel; g? shows its keys. Existing Rill/Sidekick keys still work; gT reopens it.
+h collapses or moves to the parent; za folds a folder/commit or selected file
+body; q closes only the panel; g? shows its keys. Existing Rill/Sidekick keys still work; gT reopens it.
 
 Source text is ordinary buffer text. Normal motions, character/line/block visual
 selection, / and ? search, and yanking work on materialized rows. Gutter source

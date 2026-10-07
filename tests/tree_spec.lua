@@ -183,6 +183,21 @@ return {
     end)
   end,
 
+  resize_preserves_commit_node_selection_instead_of_its_first_file = function()
+    with_tree(function(create)
+      local tree = create()
+      tree:update({
+        files = { file("src/a.lua", "A", 1) },
+        groups = { { short = "abcdef12", subject = "Change" } },
+      })
+      api.nvim_win_set_cursor(tree.win, { 1, 0 })
+      key(tree, ">")
+      H.eq("@1", tree:selected().key, "resizing must leave the selected commit node selected")
+      key(tree, "za")
+      H.eq(1, #tree.entries)
+    end)
+  end,
+
   familiar_keys_select_fold_navigate_and_close_only_the_panel = function()
     with_tree(function(create, anchor)
       local selected

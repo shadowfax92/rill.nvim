@@ -1572,6 +1572,11 @@ function M.open(opts)
         self:jump_file(entry.file)
       end
     end,
+    -- za folds file bodies as well as tree nodes; keep the session's existing
+    -- action, which delegates keyed directory/commit entries back to the panel.
+    on_toggle = function()
+      self:toggle_file()
+    end,
   })
   M.sessions[tab] = self
   self:windows()
