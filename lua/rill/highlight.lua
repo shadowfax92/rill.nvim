@@ -109,6 +109,10 @@ function M.colors()
     RillMuted = { fg = muted },
     RillNumber = { fg = muted },
     RillPadding = { bg = mix(bg, fg, 0.025) },
+    RillTreeAdded = { fg = color("DiagnosticOk", "fg", 0x8cab70) },
+    RillTreeModified = { fg = color("DiagnosticWarn", "fg", 0xe0af68) },
+    RillTreeDeleted = { fg = color("DiagnosticError", "fg", 0xe27878) },
+    RillTreeRenamed = { fg = color("DiagnosticInfo", "fg", 0x7aa2f7) },
     RillTreeCurrent = { fg = fg, bg = mix(bg, fg, 0.10), bold = true },
   }
   for name, attrs in pairs(defs) do
