@@ -36,10 +36,13 @@ COMMANDS                                                   *rill-commands*
     :Rill commits <rev>...         Each rev against its own first parent, one
                                    section per commit (|rill-commits|)
 
-    Branch mode uses the configured upstream for unpushed commits, otherwise
-    the closest local/remote branch point (including stacked parents and reflog
-    fork points). It includes staged, unstaged and untracked work. An explicit
-    base overrides detection. Save edits before reviewing disk changes. Root commits
+    Branch mode includes pushed feature commits, using the closest branch point
+    among other local/remote branches (including stacked parents and reflog fork
+    points). It excludes the current branch and its same-named remote copies.
+    Only trunk itself (origin/HEAD's branch, otherwise main or master) uses its
+    configured upstream to show unpushed commits. Both include staged, unstaged
+    and untracked work. An explicit base overrides detection. Save edits before
+    reviewing disk changes. Root commits
     and unborn HEAD use an empty tree where an ordinary parent is unavailable.
     A merge commit is compared with its first parent; no combined merge UI is
     provided. Revision modes exclude uncommitted changes.
@@ -101,8 +104,10 @@ the number of lines revealed by zo, zB, and Enter on a gap.
 Enter always opens a real working file in a normal editing window. Historical
 lines map through later edits, including unsaved buffer edits. Deleted/changed
 lines use the nearest surviving line with a notice. Git renames are followed;
-deleted files produce a message and open nothing. Sidebar, terminal, help and
-floating windows are never replaced. Selecting a file
+deleted files produce a message and open nothing. An empty start screen or
+dashboard in the launch window can be reused. Sidebar, terminal, help and
+floating windows are never replaced. Files retain normal editing options;
+creating a source tab leaves no extra empty buffer. Selecting a file
 in the sidebar jumps to it in the stream, or switches the focused file.
 
 Source text is ordinary buffer text. Normal motions, character/line/block visual

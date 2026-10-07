@@ -167,6 +167,34 @@ local function backend(snapshot, sources, opts)
   return control
 end
 
+local function listed_unnamed()
+  return vim.tbl_filter(function(buf)
+    return vim.bo[buf].buflisted and api.nvim_buf_get_name(buf) == ""
+  end, api.nvim_list_bufs())
+end
+
+local editor_options = {
+  statuscolumn = "%l ",
+  numberwidth = 6,
+  signcolumn = "yes:2",
+  number = true,
+  relativenumber = true,
+  winbar = "Editor",
+  statusline = "Editing",
+  winfixwidth = false,
+}
+
+local function assert_editor_options(win)
+  for key, value in pairs(editor_options) do
+    local actual = api.nvim_get_option_value(key, { win = win })
+    if actual == "" and api.nvim_get_option_info2(key, {}).global_local then
+      actual = api.nvim_get_option_value(key, { win = win, scope = "global" })
+    end
+    H.eq(value, actual, key)
+    H.eq(value, api.nvim_get_option_value(key, { win = win, scope = "global" }), key .. " default")
+  end
+end
+
 local function with_review(fn, options)
   options = options or {}
   local previous_git, previous_notify = package.loaded["rill.git"], vim.notify
@@ -193,8 +221,21 @@ local function with_review(fn, options)
   local origin_buf = api.nvim_create_buf(true, false)
   api.nvim_buf_set_lines(origin_buf, 0, -1, false, { "unsaved work", "keep me" })
   api.nvim_win_set_buf(origin_win, origin_buf)
+  local previous_options = {}
   local session
   local ok, err = xpcall(function()
+    for key, value in pairs(options.window_options or {}) do
+      previous_options[key] = {
+        local_value = api.nvim_get_option_value(key, { win = origin_win, scope = "local" }),
+        global_value = api.nvim_get_option_value(key, { win = origin_win, scope = "global" }),
+      }
+      api.nvim_set_option_value(key, value, { win = origin_win, scope = "global" })
+      api.nvim_set_option_value(key, value, { win = origin_win, scope = "local" })
+    end
+    if options.prepare_origin then
+      options.prepare_origin(origin_win, origin_buf)
+    end
+    local unnamed_before = listed_unnamed()
     session = view.open(vim.tbl_extend("force", {
       cwd = root,
       layout = "unified",
@@ -220,6 +261,7 @@ local function with_review(fn, options)
       origin_win = origin_win,
       origin_buf = origin_buf,
       notifications = notifications,
+      unnamed_before = unnamed_before,
     })
   end, debug.traceback)
   if session then
@@ -230,6 +272,11 @@ local function with_review(fn, options)
   if api.nvim_win_is_valid(origin_win) then
     api.nvim_set_current_win(origin_win)
     api.nvim_win_set_buf(origin_win, previous_buf)
+  end
+  local restore_win = api.nvim_win_is_valid(origin_win) and origin_win or api.nvim_get_current_win()
+  for key, values in pairs(previous_options) do
+    api.nvim_set_option_value(key, values.global_value, { win = restore_win, scope = "global" })
+    api.nvim_set_option_value(key, values.local_value, { win = restore_win, scope = "local" })
   end
   -- Cleanup our test-owned source buffers after assertions; session-owned buffers
   -- must already have been released by close(), which its own cases verify.
@@ -750,6 +797,70 @@ return {
       H.eq("", vim.bo.buftype)
       vim.cmd("tabclose!")
     end)
+  end,
+
+  ["fresh-start Enter reuses an empty or dashboard origin with editor options"] = function()
+    for _, dashboard in ipairs({ false, true }) do
+      with_review(function(session, env)
+        local tabs = #api.nvim_list_tabpages()
+        place(session, "new", 4)
+        press("<CR>")
+        H.ok(vim.wait(1000, function()
+          return api.nvim_buf_get_name(0) == env.root .. "/src/new name.lua"
+        end, 1))
+        H.eq(env.origin_win, api.nvim_get_current_win(), "reuse the start screen")
+        H.eq(tabs, #api.nvim_list_tabpages())
+        assert_editor_options(env.origin_win)
+        for _, buf in ipairs(listed_unnamed()) do
+          H.ok(vim.tbl_contains(env.unnamed_before, buf), "Enter leaked a listed empty buffer")
+          H.ok(buf ~= env.origin_buf, "replaced empty start buffer must leave the bufferline")
+        end
+      end, {
+        window_options = editor_options,
+        prepare_origin = function(_, buf)
+          api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
+          vim.bo[buf].modified = false
+          if dashboard then
+            vim.bo[buf].buftype = "nofile"
+            vim.bo[buf].buflisted = false
+            vim.bo[buf].filetype = "snacks_dashboard"
+          end
+        end,
+      })
+    end
+  end,
+
+  ["Enter from a sidebar creates a clean file tab without empty buffers"] = function()
+    with_review(function(session, env)
+      place(session, "new", 4)
+      press("<CR>")
+      H.ok(vim.wait(1000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/src/new name.lua"
+      end, 1))
+      H.ok(api.nvim_get_current_win() ~= env.origin_win)
+      assert_editor_options(api.nvim_get_current_win())
+      H.eq(env.unnamed_before, listed_unnamed(), "tab opening must not leave an empty buffer")
+      H.eq(env.origin_buf, api.nvim_win_get_buf(env.origin_win))
+      vim.cmd("tabclose!")
+    end, {
+      window_options = editor_options,
+      prepare_origin = function(win, buf)
+        vim.bo[buf].buftype = "nofile"
+        vim.bo[buf].filetype = "NvimTree"
+        api.nvim_set_option_value("winfixwidth", true, { win = win, scope = "local" })
+      end,
+    })
+  end,
+
+  ["closing the last review tab leaves a normal editing window"] = function()
+    with_review(function(session)
+      vim.cmd("tabonly!")
+      session:close()
+      H.eq(1, #api.nvim_list_tabpages())
+      H.eq(1, #api.nvim_list_wins())
+      H.eq("", vim.bo.buftype)
+      assert_editor_options(api.nvim_get_current_win())
+    end, { window_options = editor_options })
   end,
 
   ["Enter reloads an unmodified stale buffer before mapping historical lines"] = function()

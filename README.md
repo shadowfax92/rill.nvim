@@ -7,6 +7,9 @@ on its first file. Several commits can be reviewed together, each against its
 own parent, in one document.
 
 Rill is a read-only review document. **Enter** always opens the real working file in a normal editing window.
+It reuses the launch window, including an empty start screen or dashboard, when
+safe; sidebars stay intact. Files keep your normal editing options, and opening
+a new file tab does not add an empty buffer to the bufferline.
 Historical lines are mapped through later edits (including unsaved buffer edits);
 changed or deleted lines use the nearest surviving line with a brief notice.
 Git renames are followed; deleted files produce a message and open nothing. Source paths, revisions, and line numbers stay attached to
@@ -72,9 +75,12 @@ Append `--split` or `--unified` to choose the initial layout, and `--focus` or
 `--stream` to choose the initial view. Append
 `-- path/to/file another/path` to restrict the comparison to literal repository-relative paths (files or directories).
 
-Branch mode uses the upstream when configured (unpushed commits plus uncommitted
-work). Otherwise it finds the closest branch point among local/remote branches
-and reflog fork points, including stacked parents. An explicit base overrides
+Branch mode reviews the whole feature branch, including pushed commits and
+uncommitted work. It finds the closest branch point among other local/remote
+branches and reflog fork points, including stacked parents; the current branch
+and its same-named remote copies are excluded. Only trunk itself (the branch
+named by `origin/HEAD`, otherwise `main` or `master`) uses its configured upstream
+to show unpushed commits plus uncommitted work. An explicit base overrides
 automatic detection. Branch and working comparisons read disk, so save buffer
 edits before reviewing them. Revision comparisons remain pinned to commits. Root commits and unborn repositories use
 an empty-tree baseline where applicable.

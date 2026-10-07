@@ -311,7 +311,9 @@ function Session:options(win, tree)
   }
   for key, value in pairs(options) do
     pcall(function()
-      vim.wo[win][key] = value
+      -- :set would also overwrite the defaults inherited by later buffers and
+      -- splits. Review decoration belongs only to this buffer in this window.
+      api.nvim_set_option_value(key, value, { win = win, scope = "local" })
     end)
   end
 end
@@ -365,7 +367,7 @@ function Session:titles()
   for index, win in ipairs({ self.main_win, self.right_win }) do
     if valid_win(win) then
       local side = self.layout == "split" and (index == 1 and "Before · " or "After · ") or ""
-      vim.wo[win].winbar = require("rill.bar").render({
+      local bar = require("rill.bar").render({
         title = side .. display_label(title) .. " · " .. mode,
         width = api.nvim_win_get_width(win),
         layout = self.layout,
@@ -373,11 +375,16 @@ function Session:titles()
         focused = self.focus_id ~= nil,
         commits = groups ~= nil,
       })
-      vim.wo[win].statusline = "%#RillMuted# Rill · %<" .. escaped(path) .. "%=" .. count
+      api.nvim_set_option_value("winbar", bar, { win = win, scope = "local" })
+      api.nvim_set_option_value(
+        "statusline",
+        "%#RillMuted# Rill · %<" .. escaped(path) .. "%=" .. count,
+        { win = win, scope = "local" }
+      )
     end
   end
   if valid_win(self.tree_win) then
-    vim.wo[self.tree_win].winbar = "%#RillHeader# Files"
+    api.nvim_set_option_value("winbar", "%#RillHeader# Files", { win = self.tree_win, scope = "local" })
   end
 end
 
@@ -1297,15 +1304,45 @@ function Session:open_source()
       return
     end
     -- A launch from a sidebar must never replace that plugin's owned buffer.
-    -- Prefer the origin, then an ordinary editing window outside this review.
-    local function normal(win)
-      if not valid_win(win) or api.nvim_win_get_config(win).relative ~= "" then
+    -- Only the launch window may be a start screen; arbitrary scratch windows
+    -- elsewhere can belong to another plugin and are not editing destinations.
+    local function available(win)
+      return valid_win(win)
+        and api.nvim_win_get_config(win).relative == ""
+        and not M.buffers[api.nvim_win_get_buf(win)]
+        and not vim.wo[win].previewwindow
+        and not vim.wo[win].winfixwidth
+        and not vim.wo[win].winfixheight
+        and not vim.wo[win].winfixbuf
+    end
+    local function empty(buf)
+      return valid_buf(buf)
+        and api.nvim_buf_get_name(buf) == ""
+        and not vim.bo[buf].modified
+        and api.nvim_buf_line_count(buf) == 1
+        and api.nvim_buf_get_lines(buf, 0, 1, false)[1] == ""
+    end
+    local function start_screen(win)
+      if not available(win) then
         return false
       end
       local buf = api.nvim_win_get_buf(win)
-      return vim.bo[buf].buftype == "" and not M.buffers[buf] and not vim.wo[win].previewwindow
+      local ft = vim.bo[buf].filetype
+      return vim.bo[buf].buftype == "nofile"
+        and not vim.bo[buf].modified
+        and (
+          (ft == "" and empty(buf))
+          or ft == "snacks_dashboard"
+          or ft == "dashboard"
+          or ft == "alpha"
+          or ft == "starter"
+          or ft == "ministarter"
+        )
     end
-    local target = normal(self.origin_win) and self.origin_win or nil
+    local function normal(win)
+      return available(win) and vim.bo[api.nvim_win_get_buf(win)].buftype == ""
+    end
+    local target = (normal(self.origin_win) or start_screen(self.origin_win)) and self.origin_win or nil
     if not target then
       for _, win in ipairs(api.nvim_list_wins()) do
         if normal(win) then
@@ -1314,15 +1351,22 @@ function Session:open_source()
         end
       end
     end
-    if target then
-      api.nvim_set_current_win(target)
-    else
-      vim.cmd("tabnew")
-    end
     local buf = vim.fn.bufadd(location.path)
     vim.fn.bufload(buf)
     vim.bo[buf].buflisted = true
-    api.nvim_win_set_buf(0, buf)
+    if target then
+      local previous = api.nvim_win_get_buf(target)
+      api.nvim_set_current_win(target)
+      api.nvim_win_set_buf(target, buf)
+      -- Replacing the startup's empty buffer should not leave a phantom entry
+      -- in the bufferline. Keep any buffer still displayed elsewhere untouched.
+      if empty(previous) and #vim.fn.win_findbuf(previous) == 0 then
+        vim.bo[previous].buflisted = false
+      end
+    else
+      -- Split directly onto the file, avoiding tabnew's extra listed buffer.
+      vim.cmd("tab sbuffer " .. buf)
+    end
     -- BufEnter hooks or an edit during the asynchronous Git read can change
     -- the destination again; never publish a cursor outside the actual buffer.
     local target_line = math.max(1, math.min(location.line, api.nvim_buf_line_count(buf)))

@@ -427,10 +427,10 @@ local function commit_endpoints(owner, root, oid, parents, label, options, done)
   end
 end
 
--- An upstream defines "unpushed" directly. Otherwise compare all local/remote
--- parents and reflog fork points, retaining the closest ancestor of HEAD.
--- Excluding the current branch ref prevents it from selecting itself;
--- considering non-default branches is what makes stacked Grove worktrees work.
+-- Trunk reviews show unpushed work against its upstream. Feature reviews must
+-- survive a push unchanged: compare other branches and reflog fork points,
+-- excluding both the current local ref and its published remote copies. Keeping
+-- non-default candidates lets a stacked branch review only its own changes.
 local function branch_base(owner, root, head, options, done)
   owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(name_err, name)
     name = not name_err and vim.trim(name) or "HEAD"
@@ -439,96 +439,104 @@ local function branch_base(owner, root, head, options, done)
       right.branch = name
       done(nil, endpoint("commit", oid, label), right)
     end
-    resolve(owner, root, "@{upstream}", options, function(upstream_err, upstream)
-      if not upstream_err then
-        owner:run(root, { "rev-parse", "--abbrev-ref", "@{upstream}" }, options, function(_, label)
-          deliver(upstream, label and vim.trim(label) or "upstream")
-        end)
-        return
-      end
-      owner:run(
-        root,
-        { "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/heads", "refs/remotes" },
-        options,
-        function(ref_err, output)
-          if ref_err then
-            done(ref_err)
+    owner:run(
+      root,
+      { "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/heads", "refs/remotes" },
+      options,
+      function(ref_err, output)
+        if ref_err then
+          done(ref_err)
+          return
+        end
+        local refs, tips, branches, names = {}, {}, {}, {}
+        local trunk
+        for record in output:gmatch("[^\n]+") do
+          local ref, tip, symref = record:match("^(%S+) (%S+) ?(.*)$")
+          local branch = ref:match("^refs/heads/(.+)$") or ref:match("^refs/remotes/[^/]+/(.+)$")
+          refs[#refs + 1], tips[ref], branches[ref] = ref, tip, branch
+          names[branch] = true
+          if ref == "refs/remotes/origin/HEAD" and symref ~= "" then
+            trunk = symref:match("^refs/remotes/origin/(.+)$")
+          end
+        end
+        -- The remote's declared default wins even when a branch named main or
+        -- master also exists. Without that hint, use the conventional names.
+        trunk = trunk or (names.main and "main") or (names.master and "master")
+        local best, best_label
+        local fallback = name == "HEAD" and "HEAD" or nil
+        local i = 0
+        local function next_ref()
+          i = i + 1
+          local ref = refs[i]
+          if not ref then
+            if best then
+              deliver(best, best_label)
+            elseif fallback then
+              deliver(head, fallback)
+            else
+              done("No base branch found; provide a base revision")
+            end
             return
           end
-          local refs, tips, defaults = {}, {}, {}
-          for record in output:gmatch("[^\n]+") do
-            local ref, tip, symref = record:match("^(%S+) (%S+) ?(.*)$")
-            refs[#refs + 1], tips[ref] = ref, tip
-            if ref == "refs/remotes/origin/HEAD" and symref ~= "" then
-              defaults[symref] = true
-              defaults[symref:gsub("^refs/remotes/origin/", "refs/heads/")] = true
+          if branches[ref] == name or ref:match("/HEAD$") then
+            if ref == "refs/heads/" .. name then
+              fallback = name
             end
-            if ref:match("/main$") or ref:match("/master$") then
-              defaults[ref] = true
-            end
+            next_ref()
+            return
           end
-          local best, best_label
-          local fallback = name == "HEAD" and "HEAD" or nil
-          local i = 0
-          local function next_ref()
-            i = i + 1
-            local ref = refs[i]
-            if not ref then
-              if best then
-                deliver(best, best_label)
-              elseif fallback then
-                deliver(head, fallback)
-              else
-                done("No base branch found; provide a base revision")
-              end
+          local label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
+          local function consider(oid, complete)
+            -- A detached HEAD's own branch alias is not its parent. Nor is a
+            -- downstream feature branch; trunk may contain HEAD after a merge
+            -- and must still yield an empty committed diff in that case.
+            if
+              not oid or (oid == head and branches[ref] ~= trunk and (name == "HEAD" or tips[ref] ~= head))
+            then
+              complete()
               return
             end
-            if ref == "refs/heads/" .. name or ref:match("/HEAD$") then
-              if ref == "refs/heads/" .. name then
-                fallback = name
-              end
-              next_ref()
-              return
-            end
-            local label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
-            local function consider(oid, complete)
-              -- A detached HEAD's own branch alias is not its parent. Nor is
-              -- a downstream feature branch; default branches may contain HEAD
-              -- after it was merged, and must still yield an empty committed diff.
-              if not oid or (oid == head and not defaults[ref] and (name == "HEAD" or tips[ref] ~= head)) then
+            owner:run(root, { "merge-base", "--is-ancestor", oid, head }, options, function(err)
+              if err then
                 complete()
                 return
               end
-              owner:run(root, { "merge-base", "--is-ancestor", oid, head }, options, function(err)
-                if err then
-                  complete()
-                  return
-                end
-                if not best then
+              if not best then
+                best, best_label = oid, label
+                complete()
+                return
+              end
+              owner:run(root, { "merge-base", "--is-ancestor", best, oid }, options, function(older)
+                if not older and best ~= oid then
                   best, best_label = oid, label
-                  complete()
-                  return
                 end
-                owner:run(root, { "merge-base", "--is-ancestor", best, oid }, options, function(older)
-                  if not older and best ~= oid then
-                    best, best_label = oid, label
-                  end
-                  complete()
-                end)
-              end)
-            end
-            owner:run(root, { "merge-base", ref, head }, options, function(err, mb)
-              consider(not err and vim.trim(mb) or nil, function()
-                owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(fp_err, fp)
-                  consider(not fp_err and vim.trim(fp) or nil, next_ref)
-                end)
+                complete()
               end)
             end)
           end
+          owner:run(root, { "merge-base", ref, head }, options, function(err, mb)
+            consider(not err and vim.trim(mb) or nil, function()
+              owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(fp_err, fp)
+                consider(not fp_err and vim.trim(fp) or nil, next_ref)
+              end)
+            end)
+          end)
+        end
+        if name == trunk then
+          resolve(owner, root, "@{upstream}", options, function(upstream_err, upstream)
+            if upstream_err then
+              next_ref()
+              return
+            end
+            owner:run(root, { "rev-parse", "--abbrev-ref", "@{upstream}" }, options, function(_, label)
+              deliver(upstream, label and vim.trim(label) or "upstream")
+            end)
+          end)
+        else
           next_ref()
         end
-      )
-    end)
+      end
+    )
   end)
 end
 
