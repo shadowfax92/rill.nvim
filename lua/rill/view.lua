@@ -8,6 +8,7 @@ Session.__index = Session
 local ns = api.nvim_create_namespace("rill.view")
 local tree_ns = api.nvim_create_namespace("rill.tree")
 local initialized = false
+local serial = 0
 
 local function valid_win(win)
   return win and api.nvim_win_is_valid(win)
@@ -343,12 +344,6 @@ function Session:titles()
   local function escaped(text)
     return display_label(text):gsub("%%", "%%%%")
   end
-  local function revision(endpoint)
-    local label = endpoint.label or endpoint.rev or endpoint.kind
-    return label:gsub("%x%x%x%x%x%x%x%x%x%x%x%x%x+", function(oid)
-      return oid:sub(1, 8)
-    end)
-  end
   local groups = self:groups()
   local title, count = nil, #self.files .. " files "
   if groups then
@@ -358,8 +353,10 @@ function Session:titles()
     title = group_label(index, #groups, groups[index], "title")
     count = #self.files .. " files · " .. #groups .. " commits "
   else
-    title = self.snapshot and (revision(self.snapshot.left) .. " → " .. revision(self.snapshot.right))
-      or "Loading Git changes…"
+    title = self.snapshot and self.snapshot.label or "Loading Git changes…"
+    title = title:gsub("%x%x%x%x%x%x%x%x%x%x%x%x%x+", function(oid)
+      return oid:sub(1, 8)
+    end)
   end
   local mode = self.layout .. (self.focus_id and " · focused" or " · stream")
   -- current_file is a file id; commits mode namespaces ids as oid:path.
@@ -1288,60 +1285,61 @@ function Session:open_source()
   end
   local line = cell and cell.line or 1
   local column = cell and api.nvim_win_get_cursor(0)[2] or 0
-  local snapshot = file.snapshot or self.snapshot
-  local endpoint = side == "old" and snapshot.left or snapshot.right
-  local path = side == "old" and (file.meta.old_path or file.meta.path) or file.meta.path
-  local function open(buf)
-    if self.closed then
+  local generation = self.generation
+  self:request(function(done)
+    return require("rill.source").locate(file, side, line, done)
+  end, function(err, location)
+    if self.closed or self.generation ~= generation then
       return
     end
-    if valid_win(self.origin_win) then
-      api.nvim_set_current_win(self.origin_win)
+    if err then
+      notify(tostring(err), vim.log.levels.WARN)
+      return
+    end
+    -- A launch from a sidebar must never replace that plugin's owned buffer.
+    -- Prefer the origin, then an ordinary editing window outside this review.
+    local function normal(win)
+      if not valid_win(win) or api.nvim_win_get_config(win).relative ~= "" then
+        return false
+      end
+      local buf = api.nvim_win_get_buf(win)
+      return vim.bo[buf].buftype == "" and not M.buffers[buf] and not vim.wo[win].previewwindow
+    end
+    local target = normal(self.origin_win) and self.origin_win or nil
+    if not target then
+      for _, win in ipairs(api.nvim_list_wins()) do
+        if normal(win) then
+          target = win
+          break
+        end
+      end
+    end
+    if target then
+      api.nvim_set_current_win(target)
     else
       vim.cmd("tabnew")
     end
-    api.nvim_win_set_buf(0, buf)
-    local target = math.min(line, api.nvim_buf_line_count(buf))
-    local text = api.nvim_buf_get_lines(buf, target - 1, target, false)[1] or ""
-    api.nvim_win_set_cursor(0, { target, math.min(column, #text) })
-    vim.cmd("normal! zz")
-  end
-  if endpoint.kind == "worktree" and vim.fn.filereadable(snapshot.root .. "/" .. path) == 1 then
-    local buf = vim.fn.bufadd(snapshot.root .. "/" .. path)
+    local buf = vim.fn.bufadd(location.path)
     vim.fn.bufload(buf)
     vim.bo[buf].buflisted = true
-    open(buf)
-  else
-    local generation = self.generation
-    local key = generation .. ":" .. side .. ":" .. file.meta.id
-    if valid_buf(self.source_bufs[key]) then
-      open(self.source_bufs[key])
-      return
+    api.nvim_win_set_buf(0, buf)
+    -- BufEnter hooks or an edit during the asynchronous Git read can change
+    -- the destination again; never publish a cursor outside the actual buffer.
+    local target_line = math.max(1, math.min(location.line, api.nvim_buf_line_count(buf)))
+    location.exact = location.exact and target_line == location.line
+    location.line = target_line
+    local text = api.nvim_buf_get_lines(buf, location.line - 1, location.line, false)[1] or ""
+    api.nvim_win_set_cursor(0, { location.line, math.min(column, #text) })
+    vim.cmd("normal! zz")
+    if not location.exact then
+      local endpoint = file.snapshot.right
+      notify(
+        "line changed since "
+          .. (endpoint.rev or endpoint.label or endpoint.kind)
+          .. "; opened the nearest line"
+      )
     end
-    self:request(function(done)
-      return require("rill.git").source(snapshot, file.meta, side, done)
-    end, function(err, source)
-      if self.closed or self.generation ~= generation then
-        return
-      end
-      if err then
-        notify(tostring(err), vim.log.levels.ERROR)
-        return
-      end
-      if valid_buf(self.source_bufs[key]) then
-        open(self.source_bufs[key])
-        return
-      end
-      local buf = require("rill.source").create(source, {
-        root = snapshot.root,
-        path = path,
-        side = side,
-        revision = endpoint.rev or endpoint.label or endpoint.kind,
-      }, { sidekick = self.opts.sidekick })
-      self.source_bufs[key] = buf
-      open(buf)
-    end)
-  end
+  end)
 end
 
 function Session:help()
@@ -1369,7 +1367,7 @@ function Session:help()
     "           al/aL lines · af/aF file · at selection",
     "",
     "Source line numbers are in the gutter. Review-buffer row numbers differ.",
-    "Historical/deleted lines open a read-only snapshot. Worktree lines open source.",
+    "Enter opens the real working file; changed/deleted lines use the nearest line.",
     "Plain / searches materialized text; expand context to include hidden lines.",
     "",
     "Press q or Escape to close help.",
@@ -1598,8 +1596,9 @@ function M.open(opts)
   local origin_win = api.nvim_get_current_win()
   vim.cmd("tab split")
   local tab = api.nvim_get_current_tabpage()
+  serial = serial + 1
   local self = setmetatable({
-    id = tostring(vim.uv.hrtime()),
+    id = tostring(serial),
     tab = tab,
     origin_win = origin_win,
     main_win = api.nvim_get_current_win(),
@@ -1611,7 +1610,6 @@ function M.open(opts)
     files = {},
     by_id = {},
     bufs = {},
-    source_bufs = {},
     jobs = {},
     file_rows = {},
     hunk_rows = {},
@@ -1638,10 +1636,6 @@ end
 -- contiguous source lines on one side: headers/gaps break spans, and mixed
 -- old/new or multi-file selections must never become one invented file range.
 function M.context(ctx)
-  local source = require("rill.source").context(ctx)
-  if source then
-    return source
-  end
   local binding = M.buffers[ctx.buf]
   if not binding or binding.session.closed then
     return

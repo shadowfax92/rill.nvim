@@ -427,6 +427,111 @@ local function commit_endpoints(owner, root, oid, parents, label, options, done)
   end
 end
 
+-- An upstream defines "unpushed" directly. Otherwise compare all local/remote
+-- parents and reflog fork points, retaining the closest ancestor of HEAD.
+-- Excluding the current branch ref prevents it from selecting itself;
+-- considering non-default branches is what makes stacked Grove worktrees work.
+local function branch_base(owner, root, head, options, done)
+  owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(name_err, name)
+    name = not name_err and vim.trim(name) or "HEAD"
+    local function deliver(oid, label)
+      local right = endpoint("worktree")
+      right.branch = name
+      done(nil, endpoint("commit", oid, label), right)
+    end
+    resolve(owner, root, "@{upstream}", options, function(upstream_err, upstream)
+      if not upstream_err then
+        owner:run(root, { "rev-parse", "--abbrev-ref", "@{upstream}" }, options, function(_, label)
+          deliver(upstream, label and vim.trim(label) or "upstream")
+        end)
+        return
+      end
+      owner:run(
+        root,
+        { "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/heads", "refs/remotes" },
+        options,
+        function(ref_err, output)
+          if ref_err then
+            done(ref_err)
+            return
+          end
+          local refs, tips, defaults = {}, {}, {}
+          for record in output:gmatch("[^\n]+") do
+            local ref, tip, symref = record:match("^(%S+) (%S+) ?(.*)$")
+            refs[#refs + 1], tips[ref] = ref, tip
+            if ref == "refs/remotes/origin/HEAD" and symref ~= "" then
+              defaults[symref] = true
+              defaults[symref:gsub("^refs/remotes/origin/", "refs/heads/")] = true
+            end
+            if ref:match("/main$") or ref:match("/master$") then
+              defaults[ref] = true
+            end
+          end
+          local best, best_label
+          local fallback = name == "HEAD" and "HEAD" or nil
+          local i = 0
+          local function next_ref()
+            i = i + 1
+            local ref = refs[i]
+            if not ref then
+              if best then
+                deliver(best, best_label)
+              elseif fallback then
+                deliver(head, fallback)
+              else
+                done("No base branch found; provide a base revision")
+              end
+              return
+            end
+            if ref == "refs/heads/" .. name or ref:match("/HEAD$") then
+              if ref == "refs/heads/" .. name then
+                fallback = name
+              end
+              next_ref()
+              return
+            end
+            local label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
+            local function consider(oid, complete)
+              -- A detached HEAD's own branch alias is not its parent. Nor is
+              -- a downstream feature branch; default branches may contain HEAD
+              -- after it was merged, and must still yield an empty committed diff.
+              if not oid or (oid == head and not defaults[ref] and (name == "HEAD" or tips[ref] ~= head)) then
+                complete()
+                return
+              end
+              owner:run(root, { "merge-base", "--is-ancestor", oid, head }, options, function(err)
+                if err then
+                  complete()
+                  return
+                end
+                if not best then
+                  best, best_label = oid, label
+                  complete()
+                  return
+                end
+                owner:run(root, { "merge-base", "--is-ancestor", best, oid }, options, function(older)
+                  if not older and best ~= oid then
+                    best, best_label = oid, label
+                  end
+                  complete()
+                end)
+              end)
+            end
+            owner:run(root, { "merge-base", ref, head }, options, function(err, mb)
+              consider(not err and vim.trim(mb) or nil, function()
+                owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(fp_err, fp)
+                  consider(not fp_err and vim.trim(fp) or nil, next_ref)
+                end)
+              end)
+            end)
+          end
+          next_ref()
+        end
+      )
+    end)
+  end)
+end
+
 local function endpoints(owner, root, options, done)
   local mode = options.mode
   local function head_or_empty(callback)
@@ -476,6 +581,10 @@ local function endpoints(owner, root, options, done)
         done(head_err)
         return
       end
+      if mode == "branch" and not options.base then
+        branch_base(owner, root, head_oid, options, done)
+        return
+      end
       local function with_base(base)
         resolve(owner, root, base, options, function(base_err, base_oid)
           if base_err then
@@ -495,18 +604,13 @@ local function endpoints(owner, root, options, done)
             end
             return
           end
-          local right = endpoint("commit", head_oid, head)
+          local right = mode == "branch" and endpoint("worktree") or endpoint("commit", head_oid, head)
+          right.branch = mode == "branch" and head or nil
           if options.merge_base == true or (mode == "branch" and options.merge_base ~= false) then
             owner:run(root, { "merge-base", base_oid, head_oid }, options, function(merge_err, output)
               done(
                 merge_err,
-                not merge_err
-                    and endpoint(
-                      "commit",
-                      output:gsub("\n$", ""),
-                      "merge-base(" .. base .. ", " .. head .. ")"
-                    )
-                  or nil,
+                not merge_err and endpoint("commit", output:gsub("\n$", ""), base) or nil,
                 right
               )
             end)
@@ -519,31 +623,6 @@ local function endpoints(owner, root, options, done)
         with_base(options.base)
       elseif mode == "range" then
         done("Range comparisons require a base revision")
-      else
-        owner:run(
-          root,
-          { "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD" },
-          options,
-          function(origin_err, output)
-            if not origin_err then
-              with_base(output:gsub("\n$", ""))
-              return
-            end
-            resolve(owner, root, "refs/heads/main", options, function(main_err)
-              if not main_err then
-                with_base("main")
-                return
-              end
-              resolve(owner, root, "refs/heads/master", options, function(master_err)
-                if not master_err then
-                  with_base("master")
-                else
-                  done("No default branch found; provide a base revision")
-                end
-              end)
-            end)
-          end
-        )
       end
     end)
   else
@@ -1094,7 +1173,9 @@ function M.load(opts, callback)
         end
         local snapshot = {
           root = root,
-          label = left.label .. " → " .. right.label,
+          label = options.mode == "working" and "Uncommitted vs " .. left.label
+            or options.mode == "branch" and ("Branch " .. (right.branch or "HEAD") .. " vs " .. left.label .. " · commits + uncommitted")
+            or left.label .. " → " .. right.label,
           left = left,
           right = right,
           files = files,
@@ -1174,6 +1255,79 @@ function M.source(snapshot, meta, side, callback)
         )
       end
     end
+  end
+  return function()
+    owner:cancel()
+  end
+end
+
+--- Resolve a reviewed path against Git's current rename/deletion records, then
+--- read the editing content. Unsaved normal buffers take precedence over disk.
+--- One request owns both operations so closing/refreshing a review cancels them.
+function M.working_source(snapshot, meta, callback)
+  local owner = scope(callback)
+  local options = defaults(snapshot.options)
+  local path = meta.path
+  local revision = snapshot.right.rev or snapshot.right.label or snapshot.right.kind
+  local function read()
+    local absolute = snapshot.root .. "/" .. path
+    if vim.fn.filereadable(absolute) ~= 1 then
+      owner:finish(meta.path .. " was deleted after " .. revision)
+      return
+    end
+    -- This is an editing destination, not a review expansion: Neovim must be
+    -- allowed to load it even when it exceeds the review's source budgets.
+    -- Reload only unmodified buffers so mapping and the eventual window use the
+    -- same disk content. bufload alone leaves already-loaded stale text intact.
+    local buf = vim.fn.bufadd(absolute)
+    local loaded = vim.api.nvim_buf_is_loaded(buf)
+    local ok, err = pcall(function()
+      vim.fn.bufload(buf)
+      if loaded and not vim.bo[buf].modified then
+        vim.api.nvim_buf_call(buf, function()
+          vim.cmd("silent keepalt edit")
+        end)
+      end
+    end)
+    if not ok then
+      owner:finish(tostring(err))
+      return
+    end
+    owner:finish(nil, { path = absolute, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) })
+  end
+  if snapshot.right.kind == "worktree" then
+    read()
+  else
+    local args = { "diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv" }
+    if snapshot.right.kind == "commit" then
+      args[#args + 1] = snapshot.right.rev
+    end
+    args[#args + 1] = "--"
+    -- Do not filter by the old path: Git needs the destination to detect renames.
+    owner:run(snapshot.root, args, options, function(err, output)
+      if err then
+        owner:finish(err)
+        return
+      end
+      local records = vim.split(output, "\0", { plain = true, trimempty = true })
+      local i = 1
+      while i <= #records do
+        local status, old = records[i], records[i + 1]
+        if status:sub(1, 1) == "R" or status:sub(1, 1) == "C" then
+          if status:sub(1, 1) == "R" and old == meta.path then
+            path = records[i + 2]
+          end
+          i = i + 3
+        else
+          if status == "D" and old == meta.path then
+            owner:finish(meta.path .. " was deleted after " .. revision)
+            return
+          end
+          i = i + 2
+        end
+      end
+      read()
+    end)
   end
   return function()
     owner:cancel()

@@ -1,5 +1,5 @@
 -- The winbar is the review's persistent shortcut legend. Split panes share the
--- legend between them; narrow panes shed comparison text before hiding actions.
+-- legend between them; narrow panes reserve space for a recognizable title.
 local M = {}
 
 local function escape(text)
@@ -32,19 +32,23 @@ function M.render(opts)
     end
     actions[#actions + 1] = { "g?", "help" }
   end
-  -- Keep the full help entry reachable even when the window is too narrow for
-  -- all labels. The common review width displays every requested shortcut.
-  while #actions > 1 and width(actions) + 2 > opts.width do
+  -- Reserve a short title before shedding optional actions. Help remains the
+  -- last action, so all omitted shortcuts stay discoverable in narrow panes.
+  local reserve = math.min(opts.width < 80 and 10 or 24, math.floor(opts.width / 3))
+  while #actions > 1 and width(actions) + reserve + 4 > opts.width do
     table.remove(actions, #actions - 1)
   end
-  -- Titles carry multibyte separators (·, →) and commit subjects, so both fit
-  -- checks measure display columns; a byte count would blank a fitting title.
   local title = opts.title
-  if vim.fn.strdisplaywidth(title) + width(actions) + 4 > opts.width then
-    title = opts.layout == "split" and (opts.side == "old" and "Before" or "After") or "Rill"
-  end
-  if vim.fn.strdisplaywidth(title) + width(actions) + 4 > opts.width then
-    title = ""
+  local available = math.max(0, opts.width - width(actions) - 4)
+  if vim.fn.strdisplaywidth(title) > available then
+    local prefix = ""
+    for _, char in ipairs(vim.fn.split(title, "\\zs")) do
+      if vim.fn.strdisplaywidth(prefix .. char .. "…") > available then
+        break
+      end
+      prefix = prefix .. char
+    end
+    title = available > 0 and prefix .. "…" or ""
   end
   local parts = { "%#RillBarHint# " .. escape(title) .. "%=" }
   for index, action in ipairs(actions) do
