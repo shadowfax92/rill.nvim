@@ -198,6 +198,7 @@ end
 local function with_review(fn, options)
   options = options or {}
   local previous_git, previous_notify = package.loaded["rill.git"], vim.notify
+  local previous_tree = package.loaded["rill.tree"]
   local initial_buffers = {}
   for _, buf in ipairs(api.nvim_list_bufs()) do
     initial_buffers[buf] = true
@@ -224,6 +225,11 @@ local function with_review(fn, options)
   local previous_options = {}
   local session
   local ok, err = xpcall(function()
+    -- Manual Files widths belong to an editor session. Give each fixture its
+    -- own module so resizing (including :only! during cleanup tests) cannot
+    -- change another case's geometry. Reviews inside this fixture still share
+    -- the real module and its persistent width, just as they do in Neovim.
+    package.loaded["rill.tree"] = nil
     for key, value in pairs(options.window_options or {}) do
       previous_options[key] = {
         local_value = api.nvim_get_option_value(key, { win = origin_win, scope = "local" }),
@@ -288,6 +294,9 @@ local function with_review(fn, options)
   vim.wait(5, function()
     return false
   end, 1)
+  -- Restore the caller's module only after fixture-owned panels are disposed
+  -- and scheduled lifecycle callbacks have had a chance to finish.
+  package.loaded["rill.tree"] = previous_tree
   package.loaded["rill.git"], vim.notify = previous_git, previous_notify
   vim.o.columns, vim.o.switchbuf = previous_columns, previous_switchbuf
   vim.fn.delete(root, "rf")
@@ -1259,6 +1268,8 @@ return {
 
   ["commits mode renders a row per commit and reads each file from its own commit"] = function()
     with_review(function(session, env)
+      H.eq(30, api.nvim_win_get_width(session.tree.win), "fixture starts without a remembered Files width")
+      H.eq(169, api.nvim_win_get_width(session.main_win), "the full title fits beside a 30-column panel")
       local lines = buffer_lines(session.main_win)
       local function row_of(text)
         for index, line in ipairs(lines) do
