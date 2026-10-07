@@ -111,6 +111,21 @@ floating windows are never replaced. Files retain normal editing options;
 creating a source tab leaves no extra empty buffer. Selecting a file
 in the sidebar jumps to it in the stream, or switches the focused file.
 
+The Files panel adapts to the longest visible entry, capped at tree.max_width
+and tree.max_ratio of the screen. tree_width sets its initial width and the
+minimum used for content fitting, subject to those bounds. Drag the separator,
+use CTRL-W < / >, or press < / > in Files to resize. Manual width persists across
+reviews, panel toggles and layout changes for this Neovim session; automatic
+fitting then stops, but screen bounds still apply. 'winfixwidth' preserves its
+width when other windows open or equalize.
+
+Files has no number/sign columns. Folder folds, indent markers, optional file
+icons (MiniIcons or nvim-web-devicons) and colored Git status glyphs distinguish
+entries. Truncation uses ellipses and preserves filenames before indentation;
+commit headings retain the short SHA. Enter/o/l select files or expand folders;
+h collapses or moves to the parent; za folds a folder/commit; q closes only the
+panel; g? shows its keys. Existing Rill/Sidekick keys still work; gT reopens it.
+
 Source text is ordinary buffer text. Normal motions, character/line/block visual
 selection, / and ? search, and yanking work on materialized rows. Gutter source
 numbers and change signs are decorations, not part of the copied code. Hidden
@@ -176,6 +191,7 @@ Defaults: >lua
       layout = "unified",                 -- "unified" or "split"
       view = "stream",                    -- "stream" or "focus" (|rill-focus|)
       tree_width = 30,
+      tree = { adaptive = true, max_width = 60, max_ratio = 0.4, resize_step = 5, icons = true },
       context_step = 20,
       wrap = false,                       -- unified only
       syntax = true,                      -- installed Tree-sitter parsers
@@ -197,6 +213,7 @@ Public highlight groups:
     RillAdd          RillDelete          RillAddSign      RillDeleteSign
     RillHeader       RillGap             RillMuted        RillNumber
     RillPadding      RillTreeCurrent     RillGroup
+    RillTreeAdded    RillTreeModified    RillTreeDeleted  RillTreeRenamed
 
 Rill regenerates them when a review first opens and on ColorScheme. Source syntax
 uses installed Tree-sitter capture groups, e.g. @keyword.lua. Changed lines use

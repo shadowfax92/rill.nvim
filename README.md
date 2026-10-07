@@ -105,7 +105,31 @@ an empty-tree baseline where applicable.
 | `gw` | Toggle wrapping in unified mode |
 | `gr` | Refresh from Git |
 | `g?` | Show key help |
-| `q` | Close the review |
+| `q` | Close the review; in Files, close only the panel |
+
+The **Files** panel fits its visible entries, up to 60 columns or 40% of the
+screen. Drag its separator or use **Ctrl-w < / >** to resize; **< / >** in the
+panel changes its width by five columns. A manual width lasts for the Neovim
+session, across reviews, panel toggles and layout changes. Automatic fitting
+stops after a manual resize; screen-size bounds still apply.
+
+Files has no number or sign columns. It shows directory folds, indent markers,
+file icons from an available MiniIcons/devicons provider (plain fallback), and
+colored Git status glyphs. Long entries use ellipses, preserving filenames ahead
+of directory indentation; commit rows retain their short SHA before the subject.
+**Enter / o / l** select files or expand directories, **h** collapses or moves to
+the parent, **za** folds directories/commits, and **g?** shows the panel keys.
+Existing review and Sidekick keys still work there; **gT** reopens a closed panel.
+
+`tree_width` remains the initial width and the minimum used for automatic
+content fitting (subject to screen bounds). Optional controls:
+
+```lua
+require("rill").setup({
+  tree_width = 30,
+  tree = { adaptive = true, max_width = 60, max_ratio = 0.4, resize_step = 5, icons = true },
+})
+```
 
 Changed lines sit on deep green / red bands, like Claude Code's and delta's
 diffs: `#022800` / `#3d0101` on dark themes, `#d0ffd0` / `#ffe0e0` on light

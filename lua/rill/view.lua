@@ -6,7 +6,6 @@ local M = { sessions = {}, buffers = {} }
 local Session = {}
 Session.__index = Session
 local ns = api.nvim_create_namespace("rill.view")
-local tree_ns = api.nvim_create_namespace("rill.tree")
 local initialized = false
 local serial = 0
 
@@ -249,27 +248,27 @@ function Session:groups()
   return groups and #groups > 0 and groups or nil
 end
 
-function Session:buffer(key, side, tree)
+function Session:buffer(key, side)
   if valid_buf(self.bufs[key]) then
     M.buffers[self.bufs[key]].side = side
     return self.bufs[key]
   end
   local buf = api.nvim_create_buf(false, true)
   self.bufs[key] = buf
-  M.buffers[buf] = { session = self, side = side, tree = tree }
+  M.buffers[buf] = { session = self, side = side }
   api.nvim_buf_set_name(buf, ("rill://%s/%s"):format(self.id, key))
   for option, value in pairs({
     buftype = "nofile",
     bufhidden = "hide",
     swapfile = false,
     undolevels = -1,
-    filetype = tree and "rill_tree" or "rill",
+    filetype = "rill",
   }) do
     vim.bo[buf][option] = value
   end
   vim.b[buf].rill = true
   vim.bo[buf].modifiable = false
-  self:keys(buf, tree)
+  self:keys(buf)
   api.nvim_create_autocmd("CursorMoved", {
     buffer = buf,
     callback = function()
@@ -281,12 +280,12 @@ function Session:buffer(key, side, tree)
   return buf
 end
 
-function Session:options(win, tree)
+function Session:options(win)
   if not valid_win(win) then
     return
   end
   local options = {
-    number = not tree,
+    number = true,
     relativenumber = false,
     numberwidth = self.layout == "unified" and 13 or 7,
     signcolumn = "no",
@@ -296,16 +295,16 @@ function Session:options(win, tree)
     list = false,
     cursorline = true,
     cursorlineopt = "number",
-    wrap = not tree and self.layout == "unified" and self.opts.wrap or false,
+    wrap = self.layout == "unified" and self.opts.wrap or false,
     linebreak = false,
     breakindent = false,
     conceallevel = 0,
     colorcolumn = "",
     scrolloff = 3,
-    winfixwidth = tree,
-    scrollbind = not tree and self.layout == "split",
+    winfixwidth = false,
+    scrollbind = self.layout == "split",
     cursorbind = false,
-    statuscolumn = tree and "" or "%!v:lua.RillStatuscolumn()",
+    statuscolumn = "%!v:lua.RillStatuscolumn()",
     winhighlight = "Normal:Normal,NormalNC:Normal,EndOfBuffer:NonText,WinSeparator:WinSeparator",
     fillchars = "eob: ",
   }
@@ -382,9 +381,6 @@ function Session:titles()
         { win = win, scope = "local" }
       )
     end
-  end
-  if valid_win(self.tree_win) then
-    api.nvim_set_option_value("winbar", "%#RillHeader# Files", { win = self.tree_win, scope = "local" })
   end
 end
 
@@ -633,121 +629,23 @@ function Session:render(anchor)
 end
 
 function Session:render_tree()
-  if not valid_win(self.tree_win) then
-    return
-  end
-  -- Node paths double as closed_dirs keys. Commits mode prefixes them with
-  -- "@<group>" so the same directory in two commits folds independently.
-  local function insert(root, file, prefix)
-    local parts, node, path = vim.split(file.meta.path, "/", { plain = true }), root, prefix
-    for index, name in ipairs(parts) do
-      path = path == "" and name or path .. "/" .. name
-      if not node.children[name] then
-        node.children[name] = { name = name, path = path, children = {}, order = {} }
-        node.order[#node.order + 1] = name
-      end
-      node = node.children[name]
-      if index == #parts then
-        node.file = file
-      end
-    end
-  end
-  local groups = self:groups()
-  local roots = {}
-  for index = 1, groups and #groups or 1 do
-    roots[index] = { children = {}, order = {} }
-  end
-  for _, file in ipairs(self.files) do
-    local group = groups and file.meta.group
-    if not groups then
-      insert(roots[1], file, "")
-    elseif roots[group] then
-      roots[group].first = roots[group].first or file
-      insert(roots[group], file, "@" .. group)
-    end
-  end
-  local lines, entries = {}, {}
-  local function visit(node, depth)
-    for _, key in ipairs(node.order) do
-      local child, label = node.children[key], key
-      -- Compact a chain of directories into one row. Deep monorepo paths should
-      -- leave the narrow tree's width for filenames, not empty indentation.
-      while not child.file and not self.closed_dirs[child.path] and #child.order == 1 do
-        local descendant = child.children[child.order[1]]
-        if descendant.file then
-          break
-        end
-        child, label = descendant, label .. "/" .. descendant.name
-      end
-      local indent = string.rep("  ", depth)
-      if child.file then
-        lines[#lines + 1] = indent .. (child.file.meta.status or "M"):sub(1, 1) .. " " .. child.name
-        entries[#entries + 1] = { file = child.file }
-      else
-        if vim.fn.strdisplaywidth(label) > api.nvim_win_get_width(self.tree_win) - #indent - 3 then
-          label = vim.fn.pathshorten(label)
-        end
-        lines[#lines + 1] = indent .. (self.closed_dirs[child.path] and "▸ " or "▾ ") .. label .. "/"
-        entries[#entries + 1] = { directory = child.path }
-        if not self.closed_dirs[child.path] then
-          visit(child, depth + 1)
-        end
-      end
-    end
-  end
-  if groups then
-    -- A commit node folds like a directory (za) and carries its first file,
-    -- so Enter, gf and context() on it act on that file.
-    for index, group in ipairs(groups) do
-      local key, root = "@" .. index, roots[index]
-      lines[#lines + 1] = (self.closed_dirs[key] and "▸ " or "▾ ")
-        .. group_label(index, #groups, group, "tree")
-      entries[#entries + 1] = { group = index, key = key, file = root.first }
-      if not self.closed_dirs[key] then
-        if #root.order == 0 then
-          lines[#lines + 1] = "  (no changes)"
-          entries[#entries + 1] = { placeholder = true }
-        end
-        visit(root, 1)
-      end
-    end
-  else
-    visit(roots[1], 0)
-  end
-  self.tree_entries = entries
-  local buf = self:buffer("files", nil, true)
-  for i, line in ipairs(lines) do
-    lines[i] = display_label(line)
-  end
-  set_lines(
-    buf,
-    #lines > 0 and lines or { self.error and "Git error" or self.snapshot and "No changes" or "Loading…" }
-  )
-  self:highlight_tree()
+  self.tree:update({
+    files = self.files,
+    groups = self:groups(),
+    current_file = self.current_file,
+    message = self.error and "Git error" or self.snapshot and "No changes" or "Loading…",
+  })
 end
 
 function Session:highlight_tree()
-  local buf = self.bufs.files
-  if not valid_buf(buf) then
-    return
-  end
-  api.nvim_buf_clear_namespace(buf, tree_ns, 0, -1)
-  for index, entry in ipairs(self.tree_entries or {}) do
-    if entry.group then
-      api.nvim_buf_set_extmark(buf, tree_ns, index - 1, 0, { line_hl_group = "RillGroup" })
-    elseif entry.file and entry.file.meta.id == self.current_file then
-      api.nvim_buf_set_extmark(buf, tree_ns, index - 1, 0, { line_hl_group = "RillTreeCurrent" })
-    elseif entry.directory or entry.placeholder then
-      api.nvim_buf_set_extmark(buf, tree_ns, index - 1, 0, { line_hl_group = "RillMuted" })
-    end
-  end
+  self.tree:highlight(self.current_file)
 end
 
 function Session:current()
   local buf = api.nvim_get_current_buf()
   local binding = M.buffers[buf]
   if binding and binding.tree then
-    local entry = self.tree_entries[api.nvim_win_get_cursor(0)[1]]
+    local entry = self.tree.entries[api.nvim_win_get_cursor(0)[1]]
     return entry and entry.file, nil, entry
   end
   local win = binding and binding.session == self and api.nvim_get_current_win()
@@ -1232,8 +1130,7 @@ function Session:toggle_file()
   -- In the tree, za folds the node under the cursor: a commit or a directory.
   local key = entry and (entry.key or entry.directory)
   if key then
-    self.closed_dirs[key] = not self.closed_dirs[key]
-    self:render_tree()
+    self.tree:toggle(entry)
     return
   end
   if not file then
@@ -1244,17 +1141,10 @@ function Session:toggle_file()
 end
 
 function Session:toggle_tree()
-  if valid_win(self.tree_win) then
-    api.nvim_win_close(self.tree_win, true)
-    self.tree_win = nil
-  elseif valid_win(self.main_win) then
-    api.nvim_win_call(self.main_win, function()
-      vim.cmd("topleft vertical " .. self.opts.tree_width .. "split")
-      self.tree_win = api.nvim_get_current_win()
-      api.nvim_win_set_buf(self.tree_win, self:buffer("files", nil, true))
-    end)
-    self:options(self.tree_win, true)
-    self:titles()
+  if self.tree:is_open() then
+    self.tree:close()
+  else
+    self.tree:open(self.main_win)
     self:render_tree()
   end
 end
@@ -1262,8 +1152,7 @@ end
 function Session:open_source()
   local file, row, entry = self:current()
   if entry and entry.directory then
-    self.closed_dirs[entry.directory] = not self.closed_dirs[entry.directory]
-    self:render_tree()
+    self.tree:toggle(entry)
     return
   end
   if entry and file then
@@ -1448,7 +1337,7 @@ function Session:help()
   end
 end
 
-function Session:keys(buf, tree)
+function Session:keys(buf)
   local actions = {
     ["q"] = {
       "Close review",
@@ -1609,6 +1498,7 @@ function Session:close()
     require("rill.highlight").dispose(file)
   end
   M.sessions[self.tab] = nil
+  self.tree:dispose()
   -- Close only this session's windows; user buffers and the originating tab are
   -- not ours to delete. TabClosed may re-enter close, hence closed is set first.
   if api.nvim_tabpage_is_valid(self.tab) then
@@ -1616,7 +1506,7 @@ function Session:close()
       api.nvim_set_current_tabpage(self.tab)
       vim.cmd("tabclose")
     else
-      for _, win in ipairs({ self.tree_win, self.right_win }) do
+      for _, win in ipairs({ self.right_win }) do
         if valid_win(win) then
           pcall(api.nvim_win_close, win, true)
         end
@@ -1661,11 +1551,28 @@ function M.open(opts)
     file_rows = {},
     hunk_rows = {},
     collapsed = {},
-    closed_dirs = {},
-    tree_entries = {},
     generation = 0,
     cache = cache,
   }, Session)
+  -- The panel owns its buffer/window lifecycle. The session registry only
+  -- binds its rows to review identities for navigation and Sidekick capture.
+  self.tree = require("rill.tree").new({
+    id = self.id,
+    initial_width = opts.tree_width,
+    options = opts.tree,
+    attach = function(buf)
+      M.buffers[buf] = { session = self, tree = true }
+      self:keys(buf)
+    end,
+    detach = function(buf)
+      M.buffers[buf] = nil
+    end,
+    on_select = function(entry)
+      if entry.file then
+        self:jump_file(entry.file)
+      end
+    end,
+  })
   M.sessions[tab] = self
   self:windows()
   self:toggle_tree()
@@ -1693,7 +1600,7 @@ function M.context(ctx)
   end
   local row_index = ctx.range and ctx.range.from[1] or ctx.row or 1
   if binding.tree then
-    local entry = session.tree_entries[row_index]
+    local entry = session.tree.entries[row_index]
     if not entry or not entry.file then
       return
     end

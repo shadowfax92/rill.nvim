@@ -470,9 +470,9 @@ return {
 
   ["file tree selection supplies exact file context while directory rows supply none"] = function()
     with_review(function(session)
-      local tree_buf = api.nvim_win_get_buf(session.tree_win)
+      local tree_buf = api.nvim_win_get_buf(session.tree.win)
       local directory, file_row
-      for index, entry in ipairs(session.tree_entries) do
+      for index, entry in ipairs(session.tree.entries) do
         if entry.directory then
           directory = index
         end
@@ -484,8 +484,8 @@ return {
       local context = view.context({ buf = tree_buf, row = file_row })
       H.eq("tests/new.lua", context.file.path)
       H.eq({}, context.spans)
-      api.nvim_set_current_win(session.tree_win)
-      api.nvim_win_set_cursor(session.tree_win, { file_row, 0 })
+      api.nvim_set_current_win(session.tree.win)
+      api.nvim_win_set_cursor(session.tree.win, { file_row, 0 })
       session:open_source()
       H.eq(session.main_win, api.nvim_get_current_win())
       H.eq(session.file_rows.second, api.nvim_win_get_cursor(0)[1])
@@ -539,13 +539,13 @@ return {
     with_review(function(session)
       place(session, "new", 5)
       local target
-      for index, entry in ipairs(session.tree_entries) do
+      for index, entry in ipairs(session.tree.entries) do
         if entry.file and entry.file.meta.id == "second" then
           target = index
         end
       end
-      api.nvim_set_current_win(session.tree_win)
-      api.nvim_win_set_cursor(session.tree_win, { target, 0 })
+      api.nvim_set_current_win(session.tree.win)
+      api.nvim_win_set_cursor(session.tree.win, { target, 0 })
       session:toggle_focus()
       H.eq("second", session.focus_id)
       H.eq("second", session:anchor().file_id)
@@ -688,7 +688,7 @@ return {
         false
       )[1]
       H.ok(header:find("路径/naïve 🪶", 1, true), "Unicode path characters must remain readable")
-      for _, win in ipairs({ session.main_win, session.tree_win }) do
+      for _, win in ipairs({ session.main_win, session.tree.win }) do
         for _, text in ipairs(api.nvim_buf_get_lines(api.nvim_win_get_buf(win), 0, -1, false)) do
           H.eq(nil, text:find("\n", 1, true))
           H.eq(nil, text:find("\t", 1, true))
@@ -876,6 +876,24 @@ return {
         api.nvim_set_option_value("winfixwidth", true, { win = win, scope = "local" })
       end,
     })
+  end,
+
+  ["manual Files width survives layout toggles and panel-only close"] = function()
+    with_review(function(session)
+      api.nvim_win_set_width(session.tree.win, 42)
+      api.nvim_exec_autocmds("WinResized", {})
+      session:toggle_layout()
+      H.eq(42, api.nvim_win_get_width(session.tree.win))
+      session:toggle_layout()
+      H.eq(42, api.nvim_win_get_width(session.tree.win))
+      api.nvim_set_current_win(session.tree.win)
+      press("q")
+      H.eq(nil, session.tree.win)
+      H.eq(false, session.closed or false)
+      H.ok(api.nvim_win_is_valid(session.main_win))
+      session:toggle_tree()
+      H.eq(42, api.nvim_win_get_width(session.tree.win))
+    end, { columns = 160 })
   end,
 
   ["closing the last review tab leaves a normal editing window"] = function()
@@ -1298,33 +1316,29 @@ return {
   ["commit tree nodes fold independently and Enter jumps to their first file"] = function()
     with_review(function(session)
       local function tree_lines()
-        return buffer_lines(session.tree_win)
+        return buffer_lines(session.tree.win)
       end
-      H.eq({
-        "▾ 1/3 aaaaaaaa Add a",
-        "  ▾ src/",
-        "    A a.lua",
-        "    A shared.lua",
-        "▾ 2/3 bbbbbbbb Nothing",
-        "  (no changes)",
-        "▾ 3/3 cccccccc Merge side",
-        "  ▾ src/",
-        "    M shared.lua",
-      }, tree_lines())
-      api.nvim_set_current_win(session.tree_win)
-      api.nvim_win_set_cursor(session.tree_win, { 7, 0 })
+      H.eq(
+        { "@1", "@1/src", "src/a.lua", "src/shared.lua", "@2", "empty", "@3", "@3/src", "src/shared.lua" },
+        vim.tbl_map(function(entry)
+          return entry.key or (entry.file and entry.file.meta.path) or "empty"
+        end, session.tree.entries)
+      )
+      H.ok(tree_lines()[1]:find("aaaaaaaa Add a", 1, true))
+      api.nvim_set_current_win(session.tree.win)
+      api.nvim_win_set_cursor(session.tree.win, { 7, 0 })
       press("<CR>")
       H.eq(session.main_win, api.nvim_get_current_win())
       H.eq(session.file_rows[C .. ":src/shared.lua"], api.nvim_win_get_cursor(0)[1])
-      api.nvim_set_current_win(session.tree_win)
-      api.nvim_win_set_cursor(session.tree_win, { 2, 0 })
+      api.nvim_set_current_win(session.tree.win)
+      api.nvim_win_set_cursor(session.tree.win, { 2, 0 })
       press("za")
-      H.eq("  ▸ src/", tree_lines()[2])
-      H.eq("  ▾ src/", tree_lines()[6], "the same directory in another commit stays open")
-      api.nvim_win_set_cursor(session.tree_win, { 1, 0 })
+      H.ok(tree_lines()[2]:find("▸ src/", 1, true))
+      H.ok(tree_lines()[6]:find("▾ src/", 1, true), "the same directory in another commit stays open")
+      api.nvim_win_set_cursor(session.tree.win, { 1, 0 })
       press("za")
       H.eq({ "▸ 1/3 aaaaaaaa Add a", "▾ 2/3 bbbbbbbb Nothing" }, vim.list_slice(tree_lines(), 1, 2))
-      H.eq(A .. ":src/a.lua", view.context({ buf = api.nvim_win_get_buf(session.tree_win), row = 1 }).file.id)
+      H.eq(A .. ":src/a.lua", view.context({ buf = api.nvim_win_get_buf(session.tree.win), row = 1 }).file.id)
       press("<CR>")
       H.eq(session.file_rows[A .. ":src/a.lua"], api.nvim_win_get_cursor(session.main_win)[1])
     end, { fixture = commits_fixture })
