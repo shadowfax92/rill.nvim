@@ -62,6 +62,16 @@ local function paths(files)
   end, files)
 end
 
+-- Keep the bare remote inside Git's metadata so pushes exercise real tracking
+-- refs without adding fixture infrastructure to the reviewed worktree.
+local function publish_trunk(root, name)
+  local remote = root .. "/.git/test-origin.git"
+  H.command({ "git", "init", "--bare", "-q", "-b", name, remote }, root)
+  H.command({ "git", "remote", "add", "origin", remote }, root)
+  H.command({ "git", "push", "-qu", "origin", name }, root)
+  H.command({ "git", "remote", "set-head", "origin", name }, root)
+end
+
 -- R ← A ← { B on main, S on side } ← M, where M merges side into main (first
 -- parent B). Marking S and B is the case a single cumulative range drops.
 local function merge_history(root)
@@ -470,6 +480,117 @@ return {
       local merged = load(root, { mode = "range", base = main, head = "feature", merge_base = true })
       H.eq({ "main after branching" }, source(direct, direct.files[1], "old").lines)
       H.eq({ "base" }, source(merged, merged.files[1], "old").lines)
+    end)
+  end,
+
+  branch_review_keeps_pushed_feature_commits = function()
+    fixture(function(root)
+      H.write(root, "base.txt", { "base" })
+      local base = H.commit(root)
+      publish_trunk(root, "main")
+      H.command({ "git", "checkout", "-qb", "feat/x" }, root)
+      H.write(root, "pushed1.txt", { "first" })
+      H.commit(root)
+      H.write(root, "pushed2.txt", { "second" })
+      H.commit(root)
+      local before = load(root, { mode = "branch" })
+      H.eq(base, before.left.rev)
+      H.eq("Branch feat/x vs main · commits + uncommitted", before.label)
+      H.eq({ "pushed1.txt", "pushed2.txt" }, paths(before.files))
+
+      H.command({ "git", "push", "-qu", "origin", "feat/x" }, root)
+      local pushed = load(root, { mode = "branch" })
+      H.eq(before.left, pushed.left, "pushing must not move the branch review base")
+      H.eq(paths(before.files), paths(pushed.files))
+      H.command({ "git", "branch", "--unset-upstream" }, root)
+      H.eq(
+        base,
+        load(root, { mode = "branch" }).left.rev,
+        "a published copy is not a parent without tracking either"
+      )
+      H.write(root, "unpushed.txt", { "third" })
+      H.commit(root)
+      H.write(root, "base.txt", { "dirty" })
+      local mixed = load(root, { mode = "branch" })
+      H.eq(base, mixed.left.rev)
+      H.eq({ "base.txt", "pushed1.txt", "pushed2.txt", "unpushed.txt" }, paths(mixed.files))
+    end)
+  end,
+
+  branch_review_ignores_differently_named_published_upstreams = function()
+    for _, renamed in ipairs({ false, true }) do
+      fixture(function(root)
+        H.write(root, "base", { "base" })
+        local base = H.commit(root)
+        publish_trunk(root, "main")
+        H.command({ "git", "checkout", "-qb", "feature" }, root)
+        H.write(root, "pushed", { "pushed" })
+        H.commit(root)
+        H.command({ "git", "push", "-qu", "origin", renamed and "feature" or "HEAD:published" }, root)
+        if renamed then
+          H.command({ "git", "branch", "-m", "renamed" }, root)
+        end
+        H.write(root, "unpushed", { "unpushed" })
+        H.commit(root)
+        H.write(root, "base", { "dirty" })
+        local snapshot = load(root, { mode = "branch" })
+        H.eq(base, snapshot.left.rev)
+        H.eq("main", snapshot.left.label)
+        H.eq({ "base", "pushed", "unpushed" }, paths(snapshot.files))
+      end)
+    end
+  end,
+
+  branch_review_keeps_pushed_stacked_commits_against_local_or_remote_parent = function()
+    fixture(function(root)
+      H.write(root, "base", { "base" })
+      H.commit(root)
+      publish_trunk(root, "main")
+      H.command({ "git", "checkout", "-qb", "feat/parent" }, root)
+      H.write(root, "parent", { "parent" })
+      local parent = H.commit(root)
+      H.command({ "git", "push", "-qu", "origin", "feat/parent" }, root)
+      H.command({ "git", "checkout", "-qb", "feat/child" }, root)
+      H.write(root, "child", { "child" })
+      H.commit(root)
+      local before = load(root, { mode = "branch" })
+      H.command({ "git", "push", "-qu", "origin", "feat/child" }, root)
+      H.write(root, "dirty", { "dirty" })
+      local pushed = load(root, { mode = "branch" })
+      H.eq(parent, pushed.left.rev)
+      H.eq(before.left, pushed.left)
+      H.eq("Branch feat/child vs feat/parent · commits + uncommitted", pushed.label)
+      H.eq({ "child", "dirty" }, paths(pushed.files))
+
+      H.command({ "git", "branch", "-D", "feat/parent" }, root)
+      local remote = load(root, { mode = "branch" })
+      H.eq(parent, remote.left.rev)
+      H.eq("origin/feat/parent", remote.left.label)
+      H.eq(paths(pushed.files), paths(remote.files))
+    end)
+  end,
+
+  branch_uses_origin_default_before_main_for_trunk_upstream = function()
+    fixture(function(root)
+      H.command({ "git", "branch", "-m", "trunk" }, root)
+      H.write(root, "base", { "base" })
+      local base = H.commit(root)
+      publish_trunk(root, "trunk")
+      H.write(root, "unpushed", { "unpushed" })
+      H.commit(root)
+      H.write(root, "dirty", { "dirty" })
+      local trunk = load(root, { mode = "branch" })
+      H.eq(base, trunk.left.rev)
+      H.eq("origin/trunk", trunk.left.label)
+      H.eq({ "dirty", "unpushed" }, paths(trunk.files))
+
+      H.command({ "git", "checkout", "-qb", "main" }, root)
+      H.write(root, "feature", { "feature" })
+      H.commit(root)
+      H.command({ "git", "push", "-qu", "origin", "main" }, root)
+      local feature = load(root, { mode = "branch" })
+      H.eq("trunk", feature.left.label, "origin/HEAD makes main a feature branch here")
+      H.eq({ "dirty", "feature" }, paths(feature.files))
     end)
   end,
 
