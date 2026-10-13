@@ -2,7 +2,7 @@
 
 Rill shows a continuous, read-only review of changed Git files. Unified and
 split layouts share source identities; file focus is independent of layout.
-Several commits can be reviewed together, each against its own parent.
+Several commits open combined; gm switches to each commit against its own parent.
 Requires Neovim 0.11+ and Git. Tree-sitter parsers and Sidekick are optional.
 
 CONTENTS                                                        *rill*
@@ -33,8 +33,8 @@ COMMANDS                                                   *rill-commands*
     :Rill A..B                     Direct comparison of A and B
     :Rill A...B                    Merge base of A and B to B
     :Rill <rev>                    Same as :Rill commit <rev>
-    :Rill commits <rev>...         Each rev against its own first parent, one
-                                   section per commit (|rill-commits|)
+    :Rill commits <rev>...         Combined selection; gm toggles per commit
+                                   (|rill-commits|)
 
     Branch mode includes pushed feature commits, using the closest branch point
     among other local/remote branches (including stacked parents and reflog fork
@@ -81,6 +81,7 @@ All mappings below are local to Rill buffers.
     <S-Tab>     Previous file
     gs          Toggle unified / split
     gf          Focus file / return to stream
+    gm          Combined / per commit for a commit selection
     <CR>        Open source, expand gap, or select tree entry
     ]f / [f     Next / previous file
     ]c / [c     Next / previous hunk
@@ -151,12 +152,28 @@ focused:
 ==============================================================================
 MULTIPLE COMMITS                                            *rill-commits*
 
-:Rill commits <rev>... and |rill.open_commits()| review each commit's own
-change against its first parent (a root commit against the empty tree), in
-the given order, as one document. This is not a range: commits between the
-given ones are not shown, and a change one commit makes and a later one
-reverts stays visible in both. A merge is diffed against its first parent.
-Any unresolvable revision fails the whole review.
+:Rill commits <rev>... and |rill.open_commits()| open combined by default:
+one diff from the state before the selection to the newest selected commit,
+with a flat Files list and a title ending in "combined".
+
+The newest selected commit must contain all the others. Selected commits on
+its first-parent chain must be consecutive, ignoring commits that do not touch
+the selected paths. Other selected commits must be brought in by a selected
+merge and not already present before the selection. The base is the first
+parent of the oldest selected chain commit (empty tree for a root). A selected
+merge includes everything it merged, just like its own first-parent diff.
+
+Gaps and unrelated selections open per commit, with a short reason. gm toggles
+combined / per commit, preserving the current file and source line when present;
+if it cannot combine, gm explains why. ]C and [C apply only in per-commit view.
+Setup's commits_view="commits" or open_commits(..., {view="commits"}) starts
+per commit; {view="combined"} overrides that default. Setup's view="focus"
+continues to choose the file layout independently.
+
+Per-commit view shows each commit against its first parent in the given order.
+An add and a later revert remain visible in both groups (they cancel out in
+combined view). Any unresolvable revision fails the whole review. Selections
+stay pinned across refreshes and view switches.
 
 Each commit's files follow a commit row (highlight RillGroup): >
 
@@ -190,6 +207,7 @@ Defaults: >lua
     require("rill").setup({
       layout = "unified",                 -- "unified" or "split"
       view = "stream",                    -- "stream" or "focus" (|rill-focus|)
+      commits_view = "combined",          -- "combined" or "commits"
       tree_width = 30,
       tree = { adaptive = true, max_width = 60, max_ratio = 0.4, resize_step = 5, icons = true },
       context_step = 20,
@@ -258,8 +276,8 @@ base; head defaults to HEAD. Direct ranges compare snapshots, not a commit list.
 Setup options can be overridden per open call.
 
 rill.open_commits({commits}, {opts})                      *rill.open_commits()*
-    Review each commit against its own first parent, in the given order
-    (|rill-commits|). Each item is a revision string or { rev = "...",
+    Review a selection combined by default; opts.view="commits" selects
+    per-commit view (|rill-commits|). Each item is a revision string or { rev = "...",
     paths = { ... } }; an item's paths override opts.paths, which is the
     default for items without paths. Repeated commits are dropped, first
     wins. Raises an error for an empty or malformed list.

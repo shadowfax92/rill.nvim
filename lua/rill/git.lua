@@ -6,6 +6,7 @@ local uv = vim.uv
 
 local DEFAULTS = {
   mode = "working",
+  commits_view = "combined",
   max_file_bytes = 1024 * 1024,
   max_changed_lines = 20000,
   max_source_lines = 100000,
@@ -427,10 +428,9 @@ local function commit_endpoints(owner, root, oid, parents, label, options, done)
   end
 end
 
--- Trunk reviews show unpushed work against its upstream. Feature reviews must
--- survive a push unchanged: compare other branches and reflog fork points,
--- excluding both the current local ref and its published remote copies. Keeping
--- non-default candidates lets a stacked branch review only its own changes.
+-- Trunk compares with its upstream. Feature bases are the maximal shared
+-- ancestors of HEAD and eligible refs, including stacked parents. Ref count
+-- changes the input to bulk graph walks, never the number of child processes.
 local function branch_base(owner, root, head, options, done)
   owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(name_err, name)
     name = not name_err and vim.trim(name) or "HEAD"
@@ -453,12 +453,18 @@ local function branch_base(owner, root, head, options, done)
           done(ref_err)
           return
         end
-        local refs, tips, branches, names = {}, {}, {}, {}
+        local refs, names, by_ref = {}, {}, {}
         local trunk, tracking
         for record in output:gmatch("[^\n]+") do
           local ref, tip, symref, upstream = record:match("^(%S+) (%S+) (%S*) (%S*)$")
           local branch = ref:match("^refs/heads/(.+)$") or ref:match("^refs/remotes/[^/]+/(.+)$")
-          refs[#refs + 1], tips[ref], branches[ref] = ref, tip, branch
+          local entry = {
+            ref = ref,
+            tip = tip,
+            branch = branch,
+            label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", ""),
+          }
+          refs[#refs + 1], by_ref[ref] = entry, entry
           if branch then
             names[branch] = true
           end
@@ -469,77 +475,235 @@ local function branch_base(owner, root, head, options, done)
             trunk = symref:match("^refs/remotes/origin/(.+)$")
           end
         end
-        -- The remote's declared default wins even when a branch named main or
-        -- master also exists. Without that hint, use the conventional names.
         trunk = trunk or (names.main and "main") or (names.master and "master")
-        local best, best_label
-        local fallback = name == "HEAD" and "HEAD" or nil
-        local i = 0
-        local function next_ref()
-          i = i + 1
-          local ref = refs[i]
-          if not ref then
-            if best then
-              deliver(best, best_label)
-            elseif fallback then
-              deliver(head, fallback)
-            else
-              done("No base branch found; provide a base revision")
-            end
-            return
-          end
-          -- A rename or an explicit push refspec can give the published copy
-          -- a different name. Remote tracking identifies that copy; local
-          -- upstreams are stacked parents, and trunk remains a base candidate.
-          local published = ref == tracking and ref:match("^refs/remotes/") and branches[ref] ~= trunk
-          if branches[ref] == name or published or ref:match("/HEAD$") then
-            if ref == "refs/heads/" .. name then
-              fallback = name
-            end
-            next_ref()
-            return
-          end
-          local label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
-          local function consider(oid, complete)
-            -- A detached HEAD's own branch alias is not its parent. Nor is a
-            -- downstream feature branch; trunk may contain HEAD after a merge
-            -- and must still yield an empty committed diff in that case.
-            if
-              not oid or (oid == head and branches[ref] ~= trunk and (name == "HEAD" or tips[ref] ~= head))
-            then
-              complete()
-              return
-            end
-            owner:run(root, { "merge-base", "--is-ancestor", oid, head }, options, function(err)
-              if err then
-                complete()
+        local function find_base()
+          owner:run(
+            root,
+            { "for-each-ref", "--format=%(refname)", "--contains=" .. head, "refs/heads", "refs/remotes" },
+            options,
+            function(contains_err, contains_output)
+              if contains_err then
+                done(contains_err)
                 return
               end
-              if not best then
-                best, best_label = oid, label
-                complete()
-                return
+              local contains, candidates, tips, eligible = {}, {}, {}, {}
+              for ref in contains_output:gmatch("[^\n]+") do
+                contains[ref] = true
               end
-              owner:run(root, { "merge-base", "--is-ancestor", best, oid }, options, function(older)
-                if not older and best ~= oid then
-                  best, best_label = oid, label
+              local shared_head = false
+              for _, entry in ipairs(refs) do
+                local published = entry.ref == tracking
+                  and entry.ref:match("^refs/remotes/")
+                  and entry.branch ~= trunk
+                -- An equal-tip parent is useful for a fresh branch, but not for a
+                -- detached alias. Descendants never parent a feature; trunk may
+                -- contain it after merging and correctly produces an empty diff.
+                local downstream = contains[entry.ref]
+                  and entry.branch ~= trunk
+                  and (name == "HEAD" or entry.tip ~= head)
+                if
+                  entry.branch ~= name
+                  and not published
+                  and not entry.ref:match("/HEAD$")
+                  and not downstream
+                then
+                  candidates[#candidates + 1], tips[#tips + 1] = entry, entry.tip
+                  eligible[entry.ref] = true
+                  shared_head = shared_head or contains[entry.ref] or false
                 end
-                complete()
-              end)
-            end)
-          end
-          owner:run(root, { "merge-base", ref, head }, options, function(err, mb)
-            consider(not err and vim.trim(mb) or nil, function()
-              owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(fp_err, fp)
-                consider(not fp_err and vim.trim(fp) or nil, next_ref)
-              end)
-            end)
-          end)
+              end
+              local frontier, fork_labels = {}, {}
+              local function choose()
+                if #frontier == 0 then
+                  deliver(head, name)
+                  return
+                end
+                owner:run(
+                  root,
+                  vim.list_extend({ "merge-base", "--independent" }, frontier),
+                  options,
+                  function(independent_err, independent)
+                    if independent_err then
+                      done(independent_err)
+                      return
+                    end
+                    local function label_base(base)
+                      owner:run(
+                        root,
+                        {
+                          "for-each-ref",
+                          "--format=%(refname)",
+                          "--contains=" .. base,
+                          "refs/heads",
+                          "refs/remotes",
+                        },
+                        options,
+                        function(label_err, labels)
+                          if label_err then
+                            done(label_err)
+                            return
+                          end
+                          local containing = {}
+                          for ref in labels:gmatch("[^\n]+") do
+                            containing[ref] = true
+                          end
+                          local best, rank
+                          for _, entry in ipairs(candidates) do
+                            if containing[entry.ref] or fork_labels[entry.ref] == base then
+                              -- Name an exact stacked parent before a containing ref;
+                              -- otherwise retain for-each-ref's local-before-remote order.
+                              local priority = entry.tip == base and entry.branch ~= trunk and 0 or 1
+                              if not rank or priority < rank then
+                                best, rank = entry, priority
+                              end
+                            end
+                          end
+                          if best then
+                            deliver(base, best.label)
+                          else
+                            done("No base branch found; provide a base revision")
+                          end
+                        end
+                      )
+                    end
+                    local bases, maximal = {}, {}
+                    for oid in independent:gmatch("[^\n]+") do
+                      bases[#bases + 1], maximal[oid] = oid, true
+                    end
+                    if #bases == 1 then
+                      label_base(bases[1])
+                      return
+                    end
+                    -- Incomparable shared bases arise when a feature merges two
+                    -- siblings. Git's boundary order is not ref precedence:
+                    -- retain all maxima until the first eligible ref chooses.
+                    -- Repeated --contains filters are ORed in one Git process.
+                    local args = { "for-each-ref", "--format=%(refname)" }
+                    for _, oid in ipairs(bases) do
+                      args[#args + 1] = "--contains=" .. oid
+                    end
+                    vim.list_extend(args, { "refs/heads", "refs/remotes" })
+                    owner:run(root, args, options, function(err, out)
+                      if err then
+                        done(err)
+                        return
+                      end
+                      local containing = {}
+                      for ref in out:gmatch("[^\n]+") do
+                        containing[ref] = true
+                      end
+                      for _, entry in ipairs(candidates) do
+                        if containing[entry.ref] then
+                          owner:run(
+                            root,
+                            { "merge-base", "--all", entry.tip, head },
+                            options,
+                            function(mb_err, mbs)
+                              if mb_err then
+                                done(mb_err)
+                                return
+                              end
+                              for oid in mbs:gmatch("[^\n]+") do
+                                if maximal[oid] then
+                                  label_base(oid)
+                                  return
+                                end
+                              end
+                              done("Base refs changed during review; refresh the comparison")
+                            end
+                          )
+                          return
+                        elseif maximal[fork_labels[entry.ref]] then
+                          label_base(fork_labels[entry.ref])
+                          return
+                        end
+                      end
+                      done("Base refs changed during review; refresh the comparison")
+                    end)
+                  end
+                )
+              end
+              -- Reflogs can retain a fork after trunk was rewritten. Only trunk's
+              -- local/origin refs and the configured upstream get this extra work:
+              -- checking every remote ref would reintroduce the many-ref stall.
+              local reflogs, seen = {}, {}
+              for _, ref in ipairs({
+                "refs/heads/" .. (trunk or ""),
+                "refs/remotes/origin/" .. (trunk or ""),
+                tracking or "",
+              }) do
+                if eligible[ref] and not seen[ref] then
+                  reflogs[#reflogs + 1], seen[ref] = ref, true
+                end
+              end
+              local function fork_point(index)
+                local ref = reflogs[index]
+                if not ref then
+                  choose()
+                  return
+                end
+                owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(err, out)
+                  local oid = not err and vim.trim(out) or nil
+                  if
+                    not oid
+                    or (
+                      oid == head
+                      and by_ref[ref].branch ~= trunk
+                      and (name == "HEAD" or by_ref[ref].tip ~= head)
+                    )
+                  then
+                    fork_point(index + 1)
+                    return
+                  end
+                  owner:run(
+                    root,
+                    { "merge-base", "--is-ancestor", oid, head },
+                    options,
+                    function(ancestor_err)
+                      if not ancestor_err then
+                        frontier[#frontier + 1], fork_labels[ref] = oid, oid
+                      end
+                      fork_point(index + 1)
+                    end
+                  )
+                end)
+              end
+              if shared_head then
+                frontier[1] = head
+                fork_point(1)
+              elseif #tips == 0 then
+                choose()
+              else
+                -- Boundary commits are where HEAD's history meets the union of
+                -- candidates. Removing ancestors of other boundary commits leaves
+                -- exactly the closest shared history, even after merging trunk.
+                -- --not on argv does not affect revisions read through stdin.
+                local excluded = vim.tbl_map(function(tip)
+                  return "^" .. tip
+                end, tips)
+                owner:run(
+                  root,
+                  { "rev-list", "--boundary", head, "--stdin" },
+                  { stdin = table.concat(excluded, "\n") .. "\n", timeout = options.timeout },
+                  function(err, out)
+                    if err then
+                      done(err)
+                      return
+                    end
+                    for oid in out:gmatch("%-([0-9a-f]+)") do
+                      frontier[#frontier + 1] = oid
+                    end
+                    fork_point(1)
+                  end
+                )
+              end
+            end
+          )
         end
         if name == trunk then
-          resolve(owner, root, "@{upstream}", options, function(upstream_err, upstream)
-            if upstream_err then
-              next_ref()
+          resolve(owner, root, "@{upstream}", options, function(err, upstream)
+            if err then
+              find_base()
               return
             end
             owner:run(root, { "rev-parse", "--abbrev-ref", "@{upstream}" }, options, function(_, label)
@@ -547,7 +711,7 @@ local function branch_base(owner, root, head, options, done)
             end)
           end)
         else
-          next_ref()
+          find_base()
         end
       end
     )
@@ -1025,13 +1189,145 @@ local function describe_commits(owner, root, oids, options, done)
   end)
 end
 
---- Commits mode: each listed commit is reviewed against its own first parent and
---- the results form one composite snapshot (one group per commit, given order).
---- The view renders group headers from `groups` and reads sources through each
---- file's group snapshot. Every step runs sequentially under the request's single
---- owner, so one cancel (refresh/close) stops whichever Git job is in flight and
---- schedules nothing further. A rev that does not resolve fails the whole review:
---- a partial one would silently omit a commit the caller asked for.
+--- Prove that selected first-parent diffs telescope into one B..N comparison.
+--- Ancestry, not picker order or timestamps, identifies N. Gaps on that chain
+--- leak unselected changes, so only path-irrelevant gaps may be skipped. Off-chain
+--- selections must be introduced by a selected merge, not already present at B.
+local function combined_endpoints(owner, root, selected, groups, options, done)
+  local oids, chosen, paths, seen_paths, unrestricted = {}, {}, {}, {}, false
+  for index, item in ipairs(selected) do
+    oids[#oids + 1], chosen[item.oid] = item.oid, groups[index]
+    local item_paths = item.paths or options.paths
+    unrestricted = unrestricted or not item_paths or #item_paths == 0
+    for _, path in ipairs(item_paths or {}) do
+      if not seen_paths[path] then
+        paths[#paths + 1], seen_paths[path] = path, true
+      end
+    end
+  end
+  paths = not unrestricted and paths or nil
+  owner:run(root, vim.list_extend({ "merge-base", "--independent" }, oids), options, function(err, out)
+    if err then
+      done(err)
+      return
+    end
+    local independent = vim.split(out, "\n", { trimempty = true })
+    if #independent ~= 1 then
+      done(nil, nil, "No selected commit contains all the others")
+      return
+    end
+    local newest = independent[1]
+    owner:run(root, { "rev-list", "--first-parent", newest }, options, function(chain_err, chain_output)
+      if chain_err then
+        done(chain_err)
+        return
+      end
+      local chain, oldest, off_chain, merges = {}, nil, {}, {}
+      local chain_order = 0
+      for oid in chain_output:gmatch("[^\n]+") do
+        chain_order = chain_order + 1
+        chain[oid] = true
+        if chosen[oid] then
+          oldest = chosen[oid]
+          oldest.chain_order = chain_order
+          if chosen[oid].merge then
+            merges[#merges + 1] = oid
+          end
+        end
+      end
+      for _, oid in ipairs(oids) do
+        if not chain[oid] then
+          off_chain[#off_chain + 1] = oid
+        end
+      end
+      commit_endpoints(
+        owner,
+        root,
+        oldest.oid,
+        oldest.parents,
+        oldest.short,
+        options,
+        function(base_err, left)
+          if base_err then
+            done(base_err)
+            return
+          end
+          local range = { newest }
+          if left.kind ~= "empty" then
+            range[#range + 1] = "^" .. left.rev
+          end
+          local args = vim.list_extend({ "rev-list", "--first-parent" }, range)
+          args[#args + 1] = "--"
+          vim.list_extend(args, paths or {})
+          owner:run(root, args, options, function(gap_err, relevant)
+            if gap_err then
+              done(gap_err)
+              return
+            end
+            local gaps = 0
+            for oid in relevant:gmatch("[^\n]+") do
+              if not chosen[oid] then
+                gaps = gaps + 1
+              end
+            end
+            if gaps > 0 then
+              done(nil, nil, ("%d unselected commit%s in between"):format(gaps, gaps == 1 and "" or "s"))
+              return
+            end
+            local function ready()
+              done(nil, {
+                left = left,
+                right = endpoint("commit", newest, newest:sub(1, 8)),
+                paths = paths,
+                label = (#selected == 1 and "1 commit " or #selected .. " commits ")
+                  .. oldest.short
+                  .. ".."
+                  .. newest:sub(1, 8)
+                  .. " · combined",
+              })
+            end
+            if #off_chain == 0 then
+              ready()
+              return
+            end
+            if #merges == 0 then
+              done(nil, nil, "Selected side commits are not introduced by a selected merge")
+              return
+            end
+            local introduced = vim.list_extend({ "rev-list" }, merges)
+            if left.kind ~= "empty" then
+              introduced[#introduced + 1] = "^" .. left.rev
+            end
+            owner:run(root, introduced, options, function(merge_err, brought_in)
+              if merge_err then
+                done(merge_err)
+                return
+              end
+              local included = {}
+              for oid in brought_in:gmatch("[^\n]+") do
+                included[oid] = true
+              end
+              for _, oid in ipairs(off_chain) do
+                if not included[oid] then
+                  done(nil, nil, "Selected side commits are not introduced by a selected merge")
+                  return
+                end
+              end
+              ready()
+            end)
+          end)
+        end
+      )
+    end)
+  end)
+end
+
+--- A selection resolves once, then proves a safe combined range before diffing.
+--- Combined mode uses one ordinary snapshot; per-commit mode (explicit or gap
+--- fallback) retains caller-ordered groups with each file's own source endpoints.
+--- Every step runs under the request's single owner, so refresh/close cancels the
+--- in-flight job and all following work. One bad revision fails the whole review:
+--- a partial result would silently omit a commit the caller asked for.
 local function load_commits(owner, root, options, done)
   local items = {}
   for _, item in ipairs(options.commits or {}) do
@@ -1050,11 +1346,22 @@ local function load_commits(owner, root, options, done)
   end
   local selected, seen = {}, {}
   local groups, files, spent = {}, {}, 0
+  local combined, combine_reason
+  local function finish(snapshot)
+    -- Pin the selection for view switches and refresh, just like the displayed
+    -- endpoints. A moving symbolic ref must not silently change the selection.
+    snapshot.commits = vim.tbl_map(function(item)
+      return { rev = item.oid, paths = item.paths }
+    end, selected)
+    snapshot.combined, snapshot.combine_reason = combined, combine_reason
+    snapshot.commits_view = snapshot.groups and "commits" or "combined"
+    done(nil, snapshot)
+  end
 
   local function diff_group(index)
     local group = groups[index]
     if not group then
-      done(nil, {
+      finish({
         root = root,
         options = options,
         label = #groups == 1 and "1 commit" or (#groups .. " commits"),
@@ -1127,7 +1434,32 @@ local function load_commits(owner, root, options, done)
             root_commit = #info.parents == 0,
           }
         end
-        diff_group(1)
+        combined_endpoints(owner, root, selected, groups, options, function(combine_err, range, reason)
+          if combine_err then
+            done(combine_err)
+            return
+          end
+          combined, combine_reason = range, reason
+          if options.commits_view == "commits" or not range then
+            diff_group(1)
+            return
+          end
+          local combined_options = vim.tbl_extend("force", options, { paths = range.paths or {} })
+          compare(owner, root, range.left, range.right, combined_options, 0, function(diff_err, metas)
+            if diff_err then
+              done(diff_err)
+              return
+            end
+            finish({
+              root = root,
+              options = combined_options,
+              label = range.label,
+              left = range.left,
+              right = range.right,
+              files = metas,
+            })
+          end)
+        end)
       end)
       return
     end

@@ -35,10 +35,10 @@ local function display_label(text)
   return (text:gsub("[\n\r\t]", { ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }))
 end
 
--- Commits mode (open_commits) loads a composite snapshot whose groups are the
--- reviewed commits, oldest first; every file meta names its group. The row
--- label heads a commit's files in the document; the tree node and the window
--- title use shorter forms because their width is scarce.
+-- A commit selection normally loads one combined comparison. If its selected
+-- first-parent changes have gaps, Git keeps each commit in its own group to
+-- avoid leaking unselected changes. gm also opts into these groups explicitly.
+-- Group rows name each commit; the tree and winbar use shorter forms.
 local function group_label(index, total, group, form)
   local short, subject = group.short or "", group.subject or ""
   if form == "title" then
@@ -373,6 +373,7 @@ function Session:titles()
         side = index == 1 and "old" or "new",
         focused = self.focus_id ~= nil,
         commits = groups ~= nil,
+        commits_view = self.snapshot and self.snapshot.commits_view,
       })
       api.nvim_set_option_value("winbar", bar, { win = win, scope = "local" })
       api.nvim_set_option_value(
@@ -438,6 +439,7 @@ function Session:anchor()
   end)
   return {
     file_id = row.file and row.file.meta.id,
+    path = row.file and row.file.meta.path,
     kind = row.kind,
     key = row.key,
     side = side,
@@ -893,7 +895,38 @@ function Session:load(opts)
     for _, file in ipairs(self.files) do
       require("rill.highlight").dispose(file)
     end
+    local switching = self.snapshot and self.snapshot.commits_view ~= snapshot.commits_view
     self.snapshot, self.files, self.by_id = snapshot, files, by_id
+    if snapshot.commits then
+      self.opts.commits = snapshot.commits
+      self.opts.commits_view = snapshot.commits_view
+    end
+    if snapshot.combine_reason and self.last_combine_reason ~= snapshot.combine_reason then
+      notify(snapshot.combine_reason .. " — showing each commit")
+    end
+    self.last_combine_reason = snapshot.combine_reason
+    -- Combined IDs are paths; per-commit IDs include an OID. Across a switch,
+    -- follow the same path (prefer its newest first-parent occurrence, not
+    -- caller order), then let
+    -- restore() use source coordinates rather than synthetic review row numbers.
+    if switching and anchor and anchor.path then
+      local match, newest_order
+      for _, file in ipairs(files) do
+        if file.meta.path == anchor.path then
+          local group = file.meta.group and snapshot.groups[file.meta.group]
+          local order = group and group.chain_order or math.huge
+          if not match or order < newest_order then
+            match, newest_order = file, order
+          end
+        end
+      end
+      if match then
+        anchor.file_id, anchor.key = match.meta.id, nil
+        if self.focus_id then
+          self.focus_id = anchor.file_id
+        end
+      end
+    end
     local target = anchor
     if self.pending_focus and #files > 0 then
       -- view = "focus" applies once, on the first load that has files: an
@@ -913,6 +946,31 @@ function Session:load(opts)
       target = file and { file_id = file.meta.id, kind = "file" } or anchor
     end
     self:render(target)
+    for buf, binding in pairs(M.buffers) do
+      if binding.session == self and api.nvim_buf_is_valid(buf) then
+        self:commit_keys(buf)
+      end
+    end
+    -- A source line can become unchanged context in the other presentation.
+    -- Hydrate only the anchored file if the compact patch no longer shows it.
+    if switching and target and target.line and by_id[target.file_id] then
+      local visible = false
+      for _, row in ipairs(self.rows) do
+        local cell = target.side == "old" and row.old or row.new
+        if row.file == by_id[target.file_id] and cell and cell.line == target.line then
+          visible = true
+        end
+      end
+      if not visible then
+        local file = by_id[target.file_id]
+        self:ensure_source(file, function(failure)
+          if not failure then
+            require("rill.model").expand_all(file)
+            self:render(target)
+          end
+        end)
+      end
+    end
     -- Expanded rows depend on full sources. Revalidate the new comparison before
     -- restoring them, even when its compact patch looks identical: unchanged
     -- worktree text may have changed since the previous snapshot was captured.
@@ -939,6 +997,19 @@ function Session:load(opts)
     end
     restore_next(1)
   end)
+end
+
+-- View switches reuse the session's load generation and cancellation boundary;
+-- there is never a second review owning windows, readers or source identities.
+function Session:toggle_commits()
+  if not self.snapshot or not self.snapshot.commits_view then
+    return
+  end
+  if self.snapshot.commits_view == "commits" and not self.snapshot.combined then
+    notify("Cannot combine: " .. (self.snapshot.combine_reason or "selection is not contiguous"))
+    return
+  end
+  self:load({ commits_view = self.snapshot.commits_view == "combined" and "commits" or "combined" })
 end
 
 function Session:toggle_layout()
@@ -1308,6 +1379,9 @@ function Session:help()
     "",
     "Press q or Escape to close help.",
   }
+  if self.snapshot and self.snapshot.commits_view then
+    table.insert(lines, 6, "gm        combined / per commit (gaps stay per commit)")
+  end
   if commits then
     -- Right after the "[c / ]c" hunk line.
     table.insert(lines, 8, "[C / ]C   previous / next commit")
@@ -1337,6 +1411,20 @@ function Session:help()
   end
 end
 
+-- Commit jumps exist only while groups are displayed. Rebind after a load so
+-- gm does not leave per-commit navigation active over a combined comparison.
+function Session:commit_keys(buf)
+  for key, direction in pairs({ ["]C"] = 1, ["[C"] = -1 }) do
+    if self:groups() then
+      vim.keymap.set("n", key, function()
+        self:move_commit(direction)
+      end, { buffer = buf, silent = true, desc = "Rill: move commit" })
+    else
+      pcall(vim.keymap.del, "n", key, { buffer = buf })
+    end
+  end
+end
+
 function Session:keys(buf)
   local actions = {
     ["q"] = {
@@ -1361,6 +1449,12 @@ function Session:keys(buf)
       "Toggle unified / split",
       function()
         self:toggle_layout()
+      end,
+    },
+    ["gm"] = {
+      "Toggle combined / per commit",
+      function()
+        self:toggle_commits()
       end,
     },
     ["gf"] = {
@@ -1397,19 +1491,6 @@ function Session:keys(buf)
       "Previous hunk",
       function()
         self:move("hunk", -1)
-      end,
-    },
-    -- Mapped in every review; a single comparison has no commits to visit.
-    ["]C"] = {
-      "Next commit",
-      function()
-        self:move_commit(1)
-      end,
-    },
-    ["[C"] = {
-      "Previous commit",
-      function()
-        self:move_commit(-1)
       end,
     },
     ["zo"] = {
@@ -1479,6 +1560,7 @@ function Session:keys(buf)
   for key, action in pairs(actions) do
     vim.keymap.set("n", key, action[2], { buffer = buf, silent = true, desc = "Rill: " .. action[1] })
   end
+  self:commit_keys(buf)
   if self.opts.sidekick ~= false then
     require("rill.sidekick").attach(buf)
   end

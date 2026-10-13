@@ -533,7 +533,7 @@ function Tree:help()
     "q              Close Files panel",
     "gT             Reopen Files panel",
     "",
-    "Rill: gs layout, gf focus, Tab files, gr refresh, Sidekick keys",
+    "Rill: gm combined / per commit, gs layout, gf focus, gr refresh",
     "",
     "q / Escape     Close help",
   }

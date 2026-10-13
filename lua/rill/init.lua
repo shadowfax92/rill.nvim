@@ -7,6 +7,7 @@ local defaults = {
   -- "focus" opens on one file (Tab/S-Tab move between files); "stream" shows
   -- every file in one document. Either way gf toggles between the two.
   view = "stream",
+  commits_view = "combined",
   tree_width = 30,
   context_step = 20,
   wrap = false,
@@ -35,6 +36,9 @@ function M.open(opts)
   if opts.view ~= "stream" and opts.view ~= "focus" then
     error("Rill view must be stream or focus")
   end
+  if opts.commits_view ~= "combined" and opts.commits_view ~= "commits" then
+    error("Rill commits_view must be combined or commits")
+  end
   return require("rill.view").open(opts)
 end
 
@@ -57,16 +61,13 @@ function M.open_range(base, head, opts)
   return M.open(vim.tbl_extend("force", opts or {}, { mode = "range", base = base, head = head or "HEAD" }))
 end
 
----Review each commit's own change (vs its first parent; empty tree for a root
----commit) as one document, in the order given. Duplicates (same resolved oid)
----are dropped, first wins. Errors (error()) on an empty list.
----
----This is deliberately not a range: a range nets marked commits into one diff,
----so a change one commit makes and a later one reverts vanishes, and unmarked
----commits in between leak in. git.lua loads one group per commit and drops
----oid-level duplicates; identical rev strings are already dropped here.
+---Review a selection combined from its previous head to its newest commit.
+---Selected first-parent changes must be consecutive (within the selected paths);
+---side commits must be introduced by a selected merge. Gaps fall back to one
+---group per commit, so unselected changes cannot leak in. gm switches views.
+---Duplicates keep their first position and paths; an empty list is an error.
 ---@param commits (string|{ rev: string, paths?: string[] })[]
----@param opts? table   same as M.open; opts.paths is the default for items without paths
+---@param opts? table   view="combined"|"commits" overrides commits_view; paths defaults item paths
 function M.open_commits(commits, opts)
   local normalised, seen = {}, {}
   for _, item in ipairs(type(commits) == "table" and commits or {}) do
@@ -85,7 +86,13 @@ function M.open_commits(commits, opts)
   if #normalised == 0 then
     error("Rill open_commits needs at least one commit")
   end
-  return M.open(vim.tbl_extend("force", opts or {}, { mode = "commits", commits = normalised }))
+  opts = vim.tbl_extend("force", opts or {}, { mode = "commits", commits = normalised })
+  -- open() already uses view for focus/stream. Translate this entrypoint's
+  -- commit presentation override without disturbing the configured file view.
+  if opts.view == "combined" or opts.view == "commits" then
+    opts.commits_view, opts.view = opts.view, nil
+  end
+  return M.open(opts)
 end
 
 function M.current()

@@ -53,7 +53,10 @@ local function load_error(root, opts)
 end
 
 local function commits(root, items, opts)
-  return load(root, vim.tbl_extend("force", { mode = "commits", commits = items }, opts or {}))
+  return load(
+    root,
+    vim.tbl_extend("force", { mode = "commits", commits = items, commits_view = "commits" }, opts or {})
+  )
 end
 
 local function paths(files)
@@ -92,6 +95,130 @@ local function merge_history(root)
 end
 
 return {
+  branch_base_ties_keep_candidate_order_after_merging_sibling_branches = function()
+    fixture(function(root)
+      H.write(root, "base", { "base" })
+      local base = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "alpha" }, root)
+      H.write(root, "alpha", { "alpha" })
+      local alpha = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "beta", base }, root)
+      H.write(root, "beta", { "beta" })
+      H.commit(root)
+      H.command({ "git", "checkout", "-qb", "feature", "alpha" }, root)
+      H.command({ "git", "merge", "--no-ff", "-qm", "merge beta", "beta" }, root)
+      H.write(root, "own", { "own" })
+      H.commit(root)
+      local snapshot = load(root, { mode = "branch" })
+      H.eq(alpha, snapshot.left.rev)
+      H.eq("alpha", snapshot.left.label)
+      H.eq({ "beta", "own" }, paths(snapshot.files))
+    end)
+  end,
+
+  combined_path_history_skips_only_irrelevant_gaps = function()
+    fixture(function(root)
+      H.write(root, "a", { "base" })
+      local base = H.commit(root)
+      H.write(root, "a", { "one" })
+      local first = H.commit(root)
+      H.write(root, "b", { "not selected" })
+      H.commit(root)
+      H.write(root, "a", { "two" })
+      local last = H.commit(root)
+      local snapshot = commits(
+        root,
+        { { rev = first, paths = { "a" } }, { rev = last, paths = { "a" } } },
+        { commits_view = "combined" }
+      )
+      H.eq("combined", snapshot.commits_view)
+      H.eq(base, snapshot.left.rev)
+      H.eq(last, snapshot.right.rev)
+      H.eq({ "a" }, paths(snapshot.files))
+      local gap = commits(root, { first, last }, { commits_view = "combined" })
+      H.eq("commits", gap.commits_view)
+      H.eq("1 unselected commit in between", gap.combine_reason)
+      H.eq({ "a", "a" }, paths(gap.files))
+    end)
+  end,
+
+  combined_merge_accepts_introduced_side_commits_and_rejects_old_ones = function()
+    fixture(function(root)
+      local oids = merge_history(root)
+      local snapshot = commits(root, { oids.S, oids.B, oids.M }, { commits_view = "combined" })
+      H.eq("combined", snapshot.commits_view)
+      H.eq(oids.A, snapshot.left.rev)
+      H.eq(oids.M, snapshot.right.rev)
+      H.eq({ "b", "s" }, paths(snapshot.files))
+      local sides = commits(root, { oids.S, oids.B }, { commits_view = "combined" })
+      H.eq("commits", sides.commits_view)
+      H.eq("No selected commit contains all the others", sides.combine_reason)
+      H.write(root, "next", { "next" })
+      local next_commit = H.commit(root)
+      local old_side = commits(root, { oids.S, next_commit }, { commits_view = "combined" })
+      H.eq("commits", old_side.commits_view)
+      H.ok(old_side.combine_reason:find("not introduced", 1, true))
+    end)
+  end,
+
+  combined_contiguous_picks_are_one_range_including_roots = function()
+    fixture(function(root)
+      H.write(root, "a", { "one" })
+      local first = H.commit(root)
+      H.write(root, "a", { "two" })
+      local second = H.commit(root)
+      local snapshot = commits(root, { second, first }, { commits_view = "combined" })
+      H.eq("combined", snapshot.commits_view)
+      H.eq(nil, snapshot.groups)
+      H.eq("empty", snapshot.left.kind)
+      H.eq(second, snapshot.right.rev)
+      H.eq({ "a" }, paths(snapshot.files))
+      H.eq({ "two" }, source(snapshot, snapshot.files[1], "new").lines)
+      local single = commits(root, { second }, { commits_view = "combined" })
+      H.eq(first, single.left.rev)
+      H.eq(second, single.right.rev)
+    end)
+  end,
+
+  branch_base_uses_constant_processes_with_hundreds_of_refs = function()
+    fixture(function(root)
+      H.write(root, "base", { "base" })
+      local base = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "parent" }, root)
+      H.write(root, "parent", { "parent" })
+      local parent = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "child" }, root)
+      H.write(root, "child", { "child" })
+      H.commit(root)
+      local refs = {}
+      for i = 1, 400 do
+        refs[#refs + 1] = ("update refs/remotes/origin/old-%d %s"):format(i, base)
+      end
+      H.eq(
+        0,
+        vim
+          .system({ "git", "update-ref", "--stdin" }, { cwd = root, stdin = table.concat(refs, "\n") .. "\n" })
+          :wait().code
+      )
+      local system, count = vim.system, 0
+      vim.system = function(command, ...)
+        count = count + (command[1] == "git" and 1 or 0)
+        return system(command, ...)
+      end
+      local ok, err = xpcall(function()
+        local snapshot = H.await(function(done)
+          Git.load({ cwd = root, mode = "branch" }, done)
+        end, 60000)
+        H.eq(parent, snapshot.left.rev)
+        H.eq("parent", snapshot.left.label)
+        H.eq({ "child" }, paths(snapshot.files))
+        H.ok(count <= 20, "branch load spawned " .. count .. " Git processes (limit 20)")
+      end, debug.traceback)
+      vim.system = system
+      assert(ok, err)
+    end)
+  end,
+
   commits_mode_reviews_each_commit_in_the_given_order = function()
     fixture(function(root)
       H.write(root, "a", { "one" })
@@ -313,7 +440,7 @@ return {
       end
       local ok, err = pcall(function()
         cancel = Git.load(
-          { cwd = root, mode = "commits", commits = { "HEAD~2", "HEAD~1", "HEAD" } },
+          { cwd = root, mode = "commits", commits_view = "commits", commits = { "HEAD~2", "HEAD~1", "HEAD" } },
           function()
             called = true
           end
