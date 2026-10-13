@@ -3,8 +3,8 @@
 A native Git review surface for Neovim. Read changed files in one continuous
 unified diff, switch to side-by-side with **gs**, or focus one file with **gf**.
 Layout and file focus are independent, and `view = "focus"` opens every review
-on its first file. Several commits can be reviewed together, each against its
-own parent, in one document.
+on its first file. Several commits open as one combined diff; **gm** switches
+to each commit against its own parent.
 
 Rill is a read-only review document. **Enter** always opens the real working file in a normal editing window.
 It reuses the launch window, including an empty start screen or dashboard, when
@@ -53,7 +53,7 @@ shortcuts visible; **g?** opens the full key list.
 The companion personal Neovim configuration supplies asynchronous Telescope
 commit pickers (`<leader>go`, and file / folder / repository history at
 `<leader>gh`): Tab marks commits and Enter reviews every marked commit with
-`open_commits`, one section per commit. These global mappings belong to that
+`open_commits`, combined when the selection is contiguous; **gm** shows each commit. These global mappings belong to that
 configuration; Rill itself installs only review-buffer mappings.
 
 ## Comparisons
@@ -69,7 +69,7 @@ configuration; Rill itself installs only review-buffer mappings.
 | `:Rill A..B` | Same direct snapshot comparison |
 | `:Rill A...B` | Merge base of A and B → B |
 | `:Rill <rev>` | Shorthand for `:Rill commit <rev>` |
-| `:Rill commits <rev>...` | First parent → commit for each rev (empty tree for a root), one section per commit, in the given order |
+| `:Rill commits <rev>...` | Combined selection; `gm` switches to one section per commit |
 
 Append `--split` or `--unified` to choose the initial layout, and `--focus` or
 `--stream` to choose the initial view. Append
@@ -92,6 +92,7 @@ an empty-tree baseline where applicable.
 | `Tab` / `Shift-Tab` | Next / previous file, including in file focus |
 | `gs` | Toggle unified / split, preserving source position |
 | `gf` | Focus current file / return to the stream |
+| `gm` | Toggle combined / per commit for a commit selection |
 | `Enter` | Open source; expand a gap; select a tree file or directory |
 | `]f` / `[f` | Next / previous file |
 | `]c` / `[c` | Next / previous hunk |
@@ -160,11 +161,30 @@ it. The gutter shows source line numbers, which differ from review-buffer rows.
 ## Reviewing several commits
 
 `:Rill commits A B C` or `require("rill").open_commits({ "A", "B", "C" })`
-shows each commit's own change against its first parent (a root commit against
-the empty tree), in the order given, in one review. It is not a range: commits
-between them are not included, and a change one commit makes and a later one
-reverts stays visible in both. A merge commit shows what it brought in relative
-to its first parent.
+opens **combined** by default: one diff from the state before the selection to
+its newest commit, with a flat Files list. The title names the selection and
+view, e.g. `3 commits 788d8a40..aa367be0 · combined`.
+
+The newest selected commit must contain all the others. Selected commits on
+its first-parent chain must be consecutive, ignoring commits that do not touch
+the selection's paths. Other selected commits must be brought in by a selected
+merge and not already present before the selection. The base is the first
+parent of the oldest selected chain commit (empty tree for a root). A selected
+merge includes everything it merged, as its own first-parent diff does.
+
+A gap or unrelated selection opens **per commit**, with a short explanation.
+**gm** switches combined ↔ per commit, keeping the current file and source line
+when present; if the selection cannot combine, it explains why. Set
+`commits_view = "commits"` in setup or pass `{ view = "commits" }` to
+`open_commits` to start per commit. `{ view = "combined" }` overrides the setup
+default. Focus/stream remains controlled by setup's `view` (the existing
+`open_commits` focus/stream overrides also work).
+
+In per-commit view, each commit is compared with its own first parent (empty
+tree for a root), in the given order. An add followed by a revert stays visible
+in both groups; in combined view the changes cancel out. Any unresolvable
+revision fails the whole review. Selections stay pinned across refreshes and
+view switches.
 
 Each commit's files follow a commit row:
 
@@ -213,6 +233,7 @@ review selections retain their historical addresses. No Sidekick core changes ar
 require("rill").setup({
   layout = "unified",
   view = "stream", -- or "focus": open each review on its first file
+  commits_view = "combined", -- or "commits": default presentation of selections
   tree_width = 30,
   context_step = 20,
   wrap = false, -- unified only
@@ -233,7 +254,8 @@ rill.open_unstaged()
 rill.open_branch({ base = "origin/main" })
 rill.open_commit("HEAD~2")
 rill.open_range("main", "HEAD", { layout = "split", paths = { "src" } })
--- One section per commit; per-commit paths override opts.paths.
+-- Contiguous selections combine; gm toggles the per-commit view.
+-- Per-item paths override opts.paths; combined reviews use the selection's paths.
 rill.open_commits({ "HEAD~2", { rev = "HEAD", paths = { "lua" } } }, { view = "focus" })
 ```
 

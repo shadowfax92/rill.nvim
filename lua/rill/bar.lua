@@ -20,7 +20,11 @@ function M.render(opts)
   if opts.layout == "split" and opts.side == "new" then
     actions = { { "zo", "context" }, { "zR", "full file" }, { "Enter", "source" }, { "g?", "help" } }
   else
-    actions = { { "Tab/S-Tab", "files" } }
+    actions = {}
+    if opts.commits_view then
+      actions[#actions + 1] = { "gm", opts.commits_view == "combined" and "per commit" or "combined" }
+    end
+    actions[#actions + 1] = { "Tab/S-Tab", "files" }
     -- Multi-commit reviews add commit jumps right after file movement, so they
     -- outlive the context shortcuts when a narrow pane sheds actions.
     if opts.commits then

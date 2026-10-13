@@ -214,7 +214,7 @@ local function with_review(fn, options)
   H.command({ "git", "commit", "--allow-empty", "-qm", "fixture" }, root)
   local control = backend(snapshot, sources, options)
   control.working_source = real_git.working_source
-  package.loaded["rill.git"] = control
+  package.loaded["rill.git"] = options.real_git and real_git or control
   local notifications = {}
   vim.notify = function(message)
     notifications[#notifications + 1] = message
@@ -352,6 +352,20 @@ local function press(key)
   local binding = vim.fn.maparg(key, "n", false, true)
   H.eq("function", type(binding.callback), "expected local action for " .. key)
   binding.callback()
+end
+
+-- Real history at the Git/view seam: the fixture wrapper adds a final empty
+-- commit, leaving HEAD~2 and HEAD~1 as the two selected changes below.
+local function linear_history(root)
+  H.write(root, "a.lua", { "base" })
+  H.write(root, "b.lua", { "first", "base" })
+  H.commit(root, "base")
+  H.write(root, "a.lua", { "changed" })
+  H.write(root, "b.lua", { "first", "middle" })
+  H.commit(root, "first change")
+  H.write(root, "b.lua", { "first", "last" })
+  H.commit(root, "second change")
+  return {}, {}
 end
 
 local function buffer_lines(win)
@@ -1220,6 +1234,115 @@ return {
     end, { auto_load = false })
   end,
 
+  ["gm follows the newest occurrence regardless of caller ordering"] = function()
+    local function history(root)
+      H.write(root, "file", { "base" })
+      H.commit(root)
+      H.write(root, "file", { "older" })
+      H.commit(root)
+      H.write(root, "file", { "older", "new line" })
+      H.commit(root)
+      return {}, {}
+    end
+    with_review(function(session)
+      local newest = session.snapshot.right.rev
+      place(session, "new", 2, "file")
+      press("gm")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot.commits_view == "commits"
+      end, 10))
+      H.eq(newest .. ":file", session:anchor().file_id)
+      H.eq(2, session:anchor().line)
+      press("gm")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot.commits_view == "combined"
+      end, 10))
+      H.eq(2, session:anchor().line)
+    end, {
+      fixture = history,
+      real_git = true,
+      columns = 200,
+      view = { mode = "commits", commits = { "HEAD~1", "HEAD~2" }, view = "focus" },
+    })
+  end,
+
+  ["gm round trip keeps source position, flat or grouped files, width and layout"] = function()
+    with_review(function(session, env)
+      H.eq("combined", session.snapshot.commits_view)
+      H.eq(nil, session:groups())
+      H.eq(2, #session.files)
+      for _, entry in ipairs(session.tree.entries) do
+        H.eq(nil, entry.group)
+      end
+      api.nvim_win_set_width(session.tree.win, 36)
+      session:jump_file(session.files[2])
+      local row = find_row(session, function(value)
+        return value.kind == "code" and value.new and value.new.line == 2
+      end)
+      api.nvim_win_set_cursor(session.main_win, { row, 1 })
+      session:cursor_changed(api.nvim_win_get_buf(session.main_win))
+      H.ok(vim.wo[session.main_win].winbar:find("per commit", 1, true))
+      local function flip(expected)
+        press("gm")
+        H.ok(vim.wait(3000, function()
+          return session.snapshot.commits_view == expected
+        end, 10))
+        H.eq("b.lua", session:anchor().path)
+        H.eq(2, session:anchor().line)
+        H.eq(36, api.nvim_win_get_width(session.tree.win))
+      end
+      flip("commits")
+      H.eq(2, #session:groups())
+      H.ok(session.tree.entries[1].group)
+      H.ok(vim.wo[session.main_win].winbar:find("combined", 1, true))
+      flip("combined")
+      session:toggle_layout()
+      H.eq("split", session.layout)
+      api.nvim_set_current_win(session.right_win)
+      flip("commits")
+      flip("combined")
+      local context = require("rill").context({
+        buf = api.nvim_get_current_buf(),
+        win = api.nvim_get_current_win(),
+        row = api.nvim_win_get_cursor(0)[1],
+        col = 1,
+      })
+      H.eq(session.snapshot.right.rev, context.spans[1].revision)
+      local previous = session.snapshot
+      press("gr")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot ~= previous
+      end, 10))
+      H.eq("combined", session.snapshot.commits_view)
+      H.eq("b.lua", session:anchor().path)
+      press("<CR>")
+      H.ok(vim.wait(3000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/b.lua"
+      end, 10))
+      H.eq(2, api.nvim_win_get_cursor(0)[1])
+    end, {
+      fixture = linear_history,
+      real_git = true,
+      columns = 240,
+      view = { mode = "commits", commits = { "HEAD~2", "HEAD~1" }, view = "focus" },
+    })
+  end,
+
+  ["gapped selections show a short notice and gm explains why they cannot combine"] = function()
+    with_review(function(session, env)
+      H.eq("commits", session.snapshot.commits_view)
+      H.eq("1 unselected commit in between — showing each commit", env.notifications[1])
+      local previous = session.snapshot
+      press("gm")
+      H.eq(previous, session.snapshot)
+      H.eq("Cannot combine: 1 unselected commit in between", env.notifications[2])
+    end, {
+      fixture = linear_history,
+      real_git = true,
+      view = { mode = "commits", commits = { "HEAD~3", "HEAD~1" } },
+    })
+  end,
+
   ["public API validates view and parses commits and view flags"] = function()
     local rill = require("rill")
     local original, captured = view.open, nil
@@ -1253,6 +1376,17 @@ return {
       }) do
         H.eq(false, pcall(call), "empty or malformed commit lists must error")
       end
+      rill.setup({ view = "focus" })
+      rill.open_commits({ "HEAD" }, { view = "commits" })
+      H.eq("commits", captured.commits_view)
+      H.eq("focus", captured.view, "commit presentation preserves the configured file layout")
+      rill.open_commits({ "HEAD" })
+      H.eq("combined", captured.commits_view)
+      rill.setup({ commits_view = "commits" })
+      rill.open_commits({ "HEAD" })
+      H.eq("commits", captured.commits_view)
+      rill.open_commits({ "HEAD" }, { view = "combined" })
+      H.eq("combined", captured.commits_view)
       rill.setup({ view = "focus" })
       rill.open_working()
       H.eq("focus", captured.view)
