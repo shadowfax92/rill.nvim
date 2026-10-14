@@ -557,9 +557,14 @@ local function branch_base(owner, root, head, options, done)
                           local best, rank
                           for _, entry in ipairs(candidates) do
                             if containing[entry.ref] or fork_labels[entry.ref] == base then
-                              -- Name an exact stacked parent before a containing ref;
-                              -- otherwise retain for-each-ref's local-before-remote order.
-                              local priority = entry.tip == base and entry.branch ~= trunk and 0 or 1
+                              -- The base is already fixed: prefer trunk, then an
+                              -- exact-tip parent, then other containing refs. Each
+                              -- tier prefers local over remote, with ref order as
+                              -- the final tie-break. A closer base is unaffected.
+                              local priority = entry.branch == trunk and 0 or entry.tip == base and 2 or 4
+                              if entry.ref:match("^refs/remotes/") then
+                                priority = priority + 1
+                              end
                               if not rank or priority < rank then
                                 best, rank = entry, priority
                               end
