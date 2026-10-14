@@ -81,7 +81,7 @@ All mappings below are local to Rill buffers.
     <S-Tab>     Previous file
     gs          Toggle unified / split
     gf          Focus file / return to stream
-    gm          Combined / per commit for a commit selection
+    gm          Combined / per commit for a branch or commit selection
     <CR>        Open source, expand gap, or select tree entry
     ]f / [f     Next / previous file
     ]c / [c     Next / previous hunk
@@ -148,6 +148,27 @@ focused:
   - After gf returns to the stream, refreshes stay in the stream.
   - When a refresh removes the focused file, the file now at its position is
     focused (for any view setting); only an empty comparison ends focus.
+
+==============================================================================
+BRANCH GROUPS                                               *rill-branch-groups*
+
+In :Rill branch, gm switches to oldest-first commits along HEAD's first-parent
+chain, reusing the resolved base. A final "Uncommitted changes" marker contains
+HEAD-to-worktree changes, including untracked files. Clean worktrees omit it;
+with no branch commits the marker may be the only group. ]C / [C visits all
+branch groups, including header-only merges. Combined view has flat Files.
+
+Two-parent merges show resolutions/manual edits beyond Git's automatic merge
+tree, including conflict markers. A clean merge says "no changes of its own".
+Octopus merges and Git without merge-tree's write-tree stdin protocol fall back
+to the first-parent diff, labelled in the header. Temporary merge objects live
+outside the repository and are removed on reload/close. Explicit commit
+selections keep their first-parent merge diffs (|rill-commits|).
+
+commits_view="commits" sets the branch default too. open_branch({view="commits"})
+overrides it; focus/stream remains independent. gm keeps file/source position,
+layout and sidebar width. gr refreshes the current view. Enter maps historical
+lines into the working file; marker lines open directly in the worktree.
 
 ==============================================================================
 MULTIPLE COMMITS                                            *rill-commits*

@@ -92,7 +92,7 @@ an empty-tree baseline where applicable.
 | `Tab` / `Shift-Tab` | Next / previous file, including in file focus |
 | `gs` | Toggle unified / split, preserving source position |
 | `gf` | Focus current file / return to the stream |
-| `gm` | Toggle combined / per commit for a commit selection |
+| `gm` | Toggle combined / per commit for a branch or commit selection |
 | `Enter` | Open source; expand a gap; select a tree file or directory |
 | `]f` / `[f` | Next / previous file |
 | `]c` / `[c` | Next / previous hunk |
@@ -157,6 +157,28 @@ Code is ordinary scratch-buffer text: motions, visual selection, `/` and `?`,
 and copying work normally. Gutter numbers and change signs are decorations.
 **Search covers materialized text only**; expand hidden context before searching
 it. The gutter shows source line numbers, which differ from review-buffer rows.
+
+## Reviewing a branch by commit
+
+In `:Rill branch` / `<leader>gb`, **gm** switches the combined branch diff to
+oldest-first commits along HEAD's first-parent chain, reusing the resolved base.
+A final **● Uncommitted changes** group contains staged, unstaged and untracked
+changes against HEAD. Clean worktrees have no marker; a branch with no commits
+can show only that marker. **]C / [C** visits every group, including empty merges.
+
+Branch merge groups show the resolutions and manual edits beyond Git's automatic
+merge tree, including its conflict markers. A clean merge is a header-only
+**no changes of its own** marker. Octopus merges and Git versions without
+`merge-tree --write-tree --stdin` use the first-parent diff with an explicit note.
+Git's temporary merge objects live outside the reviewed repository and are
+removed when the review reloads or closes. Explicit commit selections retain
+their existing first-parent merge comparisons.
+
+`commits_view = "commits"` also sets the branch default;
+`open_branch({ view = "commits" })` overrides it for one review. **gm** keeps the
+file/source line, layout and Files width; **gr** refreshes in the current view.
+Enter from a commit maps its source line into the current working file; Enter
+from the uncommitted marker opens that worktree line directly.
 
 ## Reviewing several commits
 
@@ -233,7 +255,7 @@ review selections retain their historical addresses. No Sidekick core changes ar
 require("rill").setup({
   layout = "unified",
   view = "stream", -- or "focus": open each review on its first file
-  commits_view = "combined", -- or "commits": default presentation of selections
+  commits_view = "combined", -- or "commits": default presentation of branches and selections
   tree_width = 30,
   context_step = 20,
   wrap = false, -- unified only

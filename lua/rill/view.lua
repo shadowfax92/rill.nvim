@@ -35,33 +35,8 @@ local function display_label(text)
   return (text:gsub("[\n\r\t]", { ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }))
 end
 
--- A commit selection normally loads one combined comparison. If its selected
--- first-parent changes have gaps, Git keeps each commit in its own group to
--- avoid leaking unselected changes. gm also opts into these groups explicitly.
--- Group rows name each commit; the tree and winbar use shorter forms.
-local function group_label(index, total, group, form)
-  local short, subject = group.short or "", group.subject or ""
-  if form == "title" then
-    return ("[%d/%d] %s %s"):format(index, total, short, subject)
-  elseif form == "tree" then
-    return ("%d/%d %s %s"):format(index, total, short, subject)
-  end
-  local text = ("● %d/%d  %s  %s — %s · %s"):format(
-    index,
-    total,
-    short,
-    subject,
-    group.author or "",
-    group.date or ""
-  )
-  if group.merge then
-    text = text .. " · merge vs 1st parent"
-  end
-  if group.root_commit then
-    text = text .. " · root"
-  end
-  return text
-end
+local Group = require("rill.group")
+local group_label = Group.label
 
 -- The commit a document row belongs to: commit rows and "(no changes)" rows
 -- carry it directly, file rows through their meta.
@@ -242,7 +217,7 @@ local function initialize()
   })
 end
 
--- The commits of an open_commits review, oldest first; nil for one comparison.
+-- Displayed commit/branch groups; nil for a combined or empty comparison.
 function Session:groups()
   local groups = self.snapshot and self.snapshot.groups
   return groups and #groups > 0 and groups or nil
@@ -351,8 +326,8 @@ function Session:titles()
     -- One composite comparison spans several commits; name the commit under
     -- the cursor instead of the first parent → last commit endpoints.
     local index = groups[self.current_group] and self.current_group or 1
-    title = group_label(index, #groups, groups[index], "title")
-    count = #self.files .. " files · " .. #groups .. " commits "
+    title = group_label(index, Group.commit_count(groups), groups[index], "title")
+    count = #self.files .. " files · " .. Group.commit_count(groups) .. " commits "
   else
     title = self.snapshot and self.snapshot.label or "Loading Git changes…"
     title = title:gsub("%x%x%x%x%x%x%x%x%x%x%x%x%x+", function(oid)
@@ -441,6 +416,7 @@ function Session:anchor()
     file_id = row.file and row.file.meta.id,
     path = row.file and row.file.meta.path,
     kind = row.kind,
+    group = row_group(row),
     key = row.key,
     side = side,
     line = cell and cell.line,
@@ -453,7 +429,7 @@ function Session:restore(anchor)
   if not anchor then
     return
   end
-  local target = self.file_rows[anchor.file_id]
+  local target = self.file_rows[anchor.file_id] or (anchor.group and self.group_rows[anchor.group])
   for i, row in ipairs(self.rows) do
     if row.file and row.file.meta.id == anchor.file_id then
       local cell
@@ -521,7 +497,7 @@ function Session:render(anchor)
     return
   end
   self.rendering = true
-  self.rows, self.file_rows, self.hunk_rows = {}, {}, {}
+  self.rows, self.file_rows, self.hunk_rows, self.group_rows = {}, {}, {}, {}
   self.digits = 4
   local model = require("rill.model")
   local function add_file(file)
@@ -570,11 +546,18 @@ function Session:render(anchor)
     -- an empty one as "(no changes)", so a requested commit never vanishes.
     for index, group in ipairs(groups) do
       local members = shown[index]
-      if #members > 0 or not self.focus_id then
-        self.rows[#self.rows + 1] =
-          { kind = "group", group = index, file = members[1], text = group_label(index, #groups, group) }
+      if #members > 0 or not self.focus_id or self.focus_id == "group:" .. (group.oid or "worktree") then
+        self.group_rows[index] = #self.rows + 1
+        self.rows[#self.rows + 1] = {
+          kind = "group",
+          group = index,
+          file = members[1],
+          text = group_label(index, Group.commit_count(groups), group),
+        }
         if #members == 0 then
-          self.rows[#self.rows + 1] = { kind = "meta", group = index, text = "  (no changes)" }
+          if not group.auto_merge then
+            self.rows[#self.rows + 1] = { kind = "meta", group = index, text = "  (no changes)" }
+          end
           self.rows[#self.rows + 1] = { kind = "meta", group = index, text = "" }
         end
         for _, file in ipairs(members) do
@@ -855,11 +838,42 @@ function Session:load(opts)
     file.source_waiters = nil
   end
   self.opts = vim.tbl_extend("force", self.opts, opts or {})
+  local load_options = vim.tbl_extend("force", {}, self.opts)
+  -- Cached branch endpoints belong to a gm flip, never to a later refresh.
+  self.opts._branch = nil
   self.error = nil
+  local anchor_source
   self:request(function(done)
-    return require("rill.git").load(self.opts, done)
+    local cancelled, cancel_load = false, nil
+    local function load()
+      if not cancelled then
+        cancel_load = require("rill.git").load(load_options, done)
+      end
+    end
+    local file = anchor and anchor.line and self.by_id[anchor.file_id]
+    if file and self.snapshot and load_options.commits_view ~= self.snapshot.commits_view then
+      -- Retain the old coordinate space before replacing its snapshot/object
+      -- store. This reader shares the load generation and source-cache budgets.
+      self:ensure_source(file, function(failure)
+        if not failure then
+          anchor_source = file[anchor.side == "old" and "old_source" or "new_source"]
+        end
+        load()
+      end)
+    else
+      load()
+    end
+    return function()
+      cancelled = true
+      if cancel_load then
+        cancel_load()
+      end
+    end
   end, function(err, snapshot)
     if self.closed or generation ~= self.generation then
+      if snapshot and snapshot.dispose then
+        snapshot.dispose()
+      end
       return
     end
     if err then
@@ -870,6 +884,12 @@ function Session:load(opts)
       notify(self.error, vim.log.levels.ERROR)
       return
     end
+    -- The old document stays visible while Git loads, so viewport hydration
+    -- may have started more readers. Stop them before releasing its objects.
+    for _, cancel in pairs(self.jobs) do
+      pcall(cancel)
+    end
+    self.jobs = {}
     local previous, files, by_id, focus_index = {}, {}, {}, nil
     for index, file in ipairs(self.files) do
       previous[file.meta.id] = file
@@ -896,9 +916,14 @@ function Session:load(opts)
       require("rill.highlight").dispose(file)
     end
     local switching = self.snapshot and self.snapshot.commits_view ~= snapshot.commits_view
+    if self.snapshot and self.snapshot ~= snapshot and self.snapshot.dispose then
+      self.snapshot.dispose()
+    end
     self.snapshot, self.files, self.by_id = snapshot, files, by_id
     if snapshot.commits then
       self.opts.commits = snapshot.commits
+    end
+    if snapshot.commits_view then
       self.opts.commits_view = snapshot.commits_view
     end
     if snapshot.combine_reason and self.last_combine_reason ~= snapshot.combine_reason then
@@ -927,6 +952,12 @@ function Session:load(opts)
         end
       end
     end
+    local empty_focus
+    for _, group in ipairs(snapshot.groups or {}) do
+      if self.focus_id == "group:" .. (group.oid or "worktree") then
+        empty_focus = true
+      end
+    end
     local target = anchor
     if self.pending_focus and #files > 0 then
       -- view = "focus" applies once, on the first load that has files: an
@@ -937,7 +968,7 @@ function Session:load(opts)
       if self.focus_id ~= (anchor and anchor.file_id) then
         target = { file_id = self.focus_id, kind = "file" }
       end
-    elseif self.focus_id and not by_id[self.focus_id] then
+    elseif self.focus_id and not by_id[self.focus_id] and not empty_focus then
       -- The focused file left the comparison (committed, reverted, …). Focus
       -- whichever file now sits at its index rather than dropping the reviewer
       -- into the whole stream; only an empty comparison returns to it.
@@ -951,23 +982,45 @@ function Session:load(opts)
         self:commit_keys(buf)
       end
     end
-    -- A source line can become unchanged context in the other presentation.
-    -- Hydrate only the anchored file if the compact patch no longer shows it.
+    -- The same path may have different source coordinates in each view: a
+    -- clean merge can add upstream lines without contributing a file group.
+    -- Translate from the retained old source, then reveal the mapped context.
     if switching and target and target.line and by_id[target.file_id] then
-      local visible = false
-      for _, row in ipairs(self.rows) do
-        local cell = target.side == "old" and row.old or row.new
-        if row.file == by_id[target.file_id] and cell and cell.line == target.line then
-          visible = true
-        end
-      end
-      if not visible then
-        local file = by_id[target.file_id]
-        self:ensure_source(file, function(failure)
-          if not failure then
-            require("rill.model").expand_all(file)
-            self:render(target)
+      local file = by_id[target.file_id]
+      local function visible()
+        for _, row in ipairs(self.rows) do
+          local cell = target.side == "old" and row.old or row.new
+          if row.file == file and cell and cell.line == target.line then
+            return true
           end
+        end
+        return false
+      end
+      if anchor_source or not visible() then
+        local projected = self:anchor()
+        self:ensure_source(file, function(failure)
+          -- Source reads are async. Navigation made while they run wins over
+          -- this restoration; otherwise a delayed gm could pull the cursor back.
+          local current = self:anchor()
+          if
+            failure
+            or not projected
+            or not current
+            or current.file_id ~= projected.file_id
+            or current.line ~= projected.line
+            or current.kind ~= projected.kind
+            or current.side ~= projected.side
+          then
+            return
+          end
+          if anchor_source then
+            local after = file[target.side == "old" and "old_source" or "new_source"]
+            target.line = require("rill.source").translate_line(anchor_source, after, target.line)
+          end
+          if not visible() then
+            require("rill.model").expand_all(file)
+          end
+          self:render(target)
         end)
       end
     end
@@ -1009,7 +1062,10 @@ function Session:toggle_commits()
     notify("Cannot combine: " .. (self.snapshot.combine_reason or "selection is not contiguous"))
     return
   end
-  self:load({ commits_view = self.snapshot.commits_view == "combined" and "commits" or "combined" })
+  self:load({
+    commits_view = self.snapshot.commits_view == "combined" and "commits" or "combined",
+    _branch = self.snapshot.branch,
+  })
 end
 
 function Session:toggle_layout()
@@ -1027,15 +1083,15 @@ function Session:toggle_focus()
   -- preference must not override it on a later refresh.
   self.pending_focus = false
   local file = self:current()
-  if not file then
-    return
-  end
   local anchor = self:anchor()
   if self.focus_id then
     self.focus_id = nil
-    self:render(self.stream_anchor or anchor)
+    self:render(file and self.stream_anchor or anchor)
     self.stream_anchor = nil
   else
+    if not file then
+      return
+    end
     self.stream_anchor = anchor
     self.focus_id = file.meta.id
     self:render(
@@ -1069,11 +1125,26 @@ function Session:jump_file(file)
   end
 end
 
+-- Empty branch merges still convey useful history and are selectable in focus.
+-- A synthetic focus identity lets the header survive layout changes and refresh.
+function Session:jump_group(index)
+  local group = (self:groups() or {})[index]
+  if not group then
+    return
+  end
+  if self.focus_id then
+    self.focus_id = "group:" .. (group.oid or "worktree")
+  end
+  self.current_group = index
+  self:render({ group = index, kind = "group" })
+  api.nvim_set_current_win(self.main_win)
+end
+
 -- ]C / [C: the first file of the next / previous commit that has changes,
--- wrapping like Tab. Empty commits have no file to land on and are skipped.
+-- wrapping like Tab. Selections skip empty commits; branches retain merge markers.
 function Session:move_commit(direction)
   local groups = self:groups()
-  if not groups or #self.files == 0 then
+  if not groups then
     return
   end
   local first = {}
@@ -1090,9 +1161,13 @@ function Session:move_commit(direction)
     or self.current_group
     or 1
   for step = 1, #groups do
-    local target = first[(current - 1 + direction * step) % #groups + 1]
+    local index = (current - 1 + direction * step) % #groups + 1
+    local target = first[index]
     if target then
       self:jump_file(target)
+      return
+    elseif self.snapshot.branch then
+      self:jump_group(index)
       return
     end
   end
@@ -1382,6 +1457,15 @@ function Session:help()
   if self.snapshot and self.snapshot.commits_view then
     table.insert(lines, 6, "gm        combined / per commit (gaps stay per commit)")
   end
+  if self.snapshot and self.snapshot.branch then
+    table.insert(lines, #lines - 2, "Branch: first-parent commits, then Uncommitted changes (when dirty).")
+    table.insert(
+      lines,
+      #lines - 2,
+      "Merges: resolutions/edits beyond Git's automatic merge; clean merges are empty."
+    )
+    table.insert(lines, #lines - 2, "Octopus/old Git: first-parent diff, labelled in the group header.")
+  end
   if commits then
     -- Right after the "[c / ]c" hunk line.
     table.insert(lines, 8, "[C / ]C   previous / next commit")
@@ -1579,6 +1663,9 @@ function Session:close()
   for _, file in ipairs(self.files) do
     require("rill.highlight").dispose(file)
   end
+  if self.snapshot and self.snapshot.dispose then
+    self.snapshot.dispose()
+  end
   M.sessions[self.tab] = nil
   self.tree:dispose()
   -- Close only this session's windows; user buffers and the originating tab are
@@ -1652,6 +1739,8 @@ function M.open(opts)
     on_select = function(entry)
       if entry.file then
         self:jump_file(entry.file)
+      elseif entry.group and self.snapshot and self.snapshot.branch then
+        self:jump_group(entry.group)
       end
     end,
     -- za folds file bodies as well as tree nodes; keep the session's existing

@@ -19,6 +19,20 @@ local function map_line(hunks, line)
   return line + offset, true
 end
 
+--- Translate a source coordinate between two complete snapshots. Branch view
+--- switches can cross upstream-only insertions even when the reviewed path is
+--- unchanged. Enter uses the same mapping to reach the editable worktree.
+function M.translate_line(before, after, line)
+  local hunks = vim.diff(
+    table.concat(before, "\n") .. "\n",
+    table.concat(after, "\n") .. "\n",
+    { result_type = "indices", algorithm = "histogram", ignore_cr_at_eol = true }
+  )
+  local mapped, exact = map_line(hunks, line)
+  local clamped = math.max(1, math.min(mapped, #after))
+  return clamped, exact and mapped == clamped
+end
+
 -- Context within a review hunk is exact. Runs of removed/added lines are the
 -- only approximate regions; treating the entire context-bearing hunk as changed
 -- would incorrectly warn for unchanged lines next to an edit.
@@ -84,13 +98,8 @@ function M.locate(file, side, line, callback)
       return
     end
     if reviewed then
-      local hunks = vim.diff(
-        table.concat(reviewed.lines, "\n") .. "\n",
-        table.concat(current.lines, "\n") .. "\n",
-        { result_type = "indices", algorithm = "histogram", ignore_cr_at_eol = true }
-      )
       local unchanged
-      line, unchanged = map_line(hunks, line)
+      line, unchanged = M.translate_line(reviewed.lines, current.lines, line)
       exact = exact and unchanged
     end
     local clamped = math.max(1, math.min(line, #current.lines))

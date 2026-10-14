@@ -293,8 +293,9 @@ local function captures(parser, source, lines, checkpoint)
 end
 
 local function detect_snapshot_type(path, lines)
-  -- Ambiguous extensions (notably .ts: TypeScript or Qt XML) use detectors
-  -- that read buffer lines on Neovim 0.11; filename + contents is insufficient.
+  -- Ambiguous extensions (notably .ts: TypeScript or Qt XML) need source lines.
+  -- A filename-only match may return a default on newer Neovim, so it cannot
+  -- short-circuit this read. 0.11 detectors need a buffer rather than contents.
   -- This unnamed, unlisted buffer exists only during detection. Never read the
   -- worktree or set filetype: either could use the wrong revision or start LSPs.
   local buf
@@ -333,7 +334,6 @@ function M.syntax(file, done)
     -- A rename can also change language. Each side is parsed as its own filename
     -- and full source, never as the concatenated synthetic diff document.
     local path = (side == "old" and file.meta.old_path) or file.meta.path
-    local ft = vim.filetype.match({ filename = path })
     local original = file[side .. "_source"] or {}
     if #original == 0 or #original > max_lines then
       finished(side)
@@ -355,8 +355,7 @@ function M.syntax(file, done)
           return
         end
         -- Source budgets are enforced before materializing a detection buffer.
-        -- Most extensions resolve by name and keep the buffer-free fast path.
-        ft = ft or detect_snapshot_type(path, prepared.lines)
+        local ft = detect_snapshot_type(path, prepared.lines)
         local lang = ft and vim.treesitter.language.get_lang(ft)
         if not lang then
           finished(side)

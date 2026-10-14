@@ -212,6 +212,9 @@ local function with_review(fn, options)
   local snapshot, sources = (options.fixture or fixture)(root)
   H.command({ "git", "add", "--all" }, root)
   H.command({ "git", "commit", "--allow-empty", "-qm", "fixture" }, root)
+  if options.after_commit then
+    options.after_commit(root)
+  end
   local control = backend(snapshot, sources, options)
   control.working_source = real_git.working_source
   package.loaded["rill.git"] = options.real_git and real_git or control
@@ -395,6 +398,171 @@ local function without_files(snapshot, keep)
 end
 
 return {
+  ["branch gm maps source lines across upstream insertions on both sides"] = function()
+    for _, layout in ipairs({ "stream", "focus" }) do
+      for _, side in ipairs({ "old", "new" }) do
+        with_review(function(session)
+          place(session, side, 25, "a")
+          local function flip(view_mode, line)
+            press("gm")
+            H.ok(
+              vim.wait(3000, function()
+                local anchor = session:anchor()
+                return session.snapshot.commits_view == view_mode and anchor and anchor.line == line
+              end, 10),
+              "gm must translate the anchored source line"
+            )
+            local row = session.rows[api.nvim_win_get_cursor(api.nvim_get_current_win())[1]]
+            H.eq(side == "new" and "feature change" or "base 20", row[side].text)
+          end
+          flip("commits", 20)
+          flip("combined", 25)
+        end, {
+          fixture = function(root)
+            local lines = {}
+            for i = 1, 30 do
+              lines[i] = "base " .. i
+            end
+            H.write(root, "a", lines)
+            H.commit(root)
+            H.command({ "git", "checkout", "-qb", "feature" }, root)
+            lines[20] = "feature change"
+            H.write(root, "a", lines)
+            H.commit(root)
+            H.command({ "git", "checkout", "-q", "main" }, root)
+            local upstream = {}
+            for i = 1, 5 do
+              upstream[i] = "inserted " .. i
+            end
+            for i = 1, 30 do
+              upstream[#upstream + 1] = "base " .. i
+            end
+            H.write(root, "a", upstream)
+            H.commit(root)
+            H.command({ "git", "checkout", "-q", "feature" }, root)
+            H.command({ "git", "merge", "--no-ff", "-qm", "merge main", "main" }, root)
+            return {}, {}
+          end,
+          real_git = true,
+          columns = 240,
+          view = { mode = "branch", view = layout, layout = "split" },
+        })
+      end
+    end
+  end,
+
+  ["branch gm retains position and marker Enter uses the worktree"] = function()
+    with_review(function(session, env)
+      H.eq("combined", session.snapshot.commits_view)
+      place(session, "new", 3, "a")
+      api.nvim_win_set_width(session.tree.win, 36)
+      press("gm")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot.commits_view == "commits"
+      end, 10))
+      H.eq("worktree:a", session:anchor().file_id)
+      H.eq(3, session:anchor().line)
+      H.eq("uncommitted", session:groups()[#session:groups()].kind)
+      H.ok(table.concat(buffer_lines(session.main_win), "\n"):find("Uncommitted changes", 1, true))
+      H.eq(36, api.nvim_win_get_width(session.tree.win))
+      local old = session.snapshot
+      press("gr")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot ~= old
+      end, 10))
+      H.eq("commits", session.snapshot.commits_view)
+      session:toggle_layout()
+      api.nvim_set_current_win(session.right_win)
+      press("gm")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot.commits_view == "combined"
+      end, 10))
+      H.eq(3, session:anchor().line)
+      press("gm")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot.commits_view == "commits"
+      end, 10))
+      H.eq(3, session:anchor().line)
+      press("<CR>")
+      H.ok(vim.wait(3000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/a"
+      end, 10))
+      H.eq(3, api.nvim_win_get_cursor(0)[1])
+      api.nvim_set_current_tabpage(session.tab)
+      session:jump_file(session.files[1])
+      place(session, "new", 2, session.files[1].meta.id)
+      press("<CR>")
+      H.ok(vim.wait(3000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/a"
+      end, 10))
+      H.eq(2, api.nvim_win_get_cursor(0)[1])
+    end, {
+      fixture = function(root)
+        H.write(root, "a", { "base" })
+        H.commit(root)
+        H.command({ "git", "checkout", "-qb", "feature" }, root)
+        H.write(root, "a", { "base", "committed" })
+        H.commit(root)
+        return {}, {}
+      end,
+      after_commit = function(root)
+        H.write(root, "a", { "base", "committed", "dirty" })
+        H.write(root, "new", { "untracked" })
+      end,
+      real_git = true,
+      columns = 240,
+      view = { mode = "branch", view = "focus" },
+    })
+  end,
+
+  ["branch empty merge is navigable in focus and releases its object store"] = function()
+    with_review(function(session)
+      local merge = session.snapshot.groups[2]
+      H.eq("no changes of its own", merge.note)
+      local directory = merge.snapshot.git_env.GIT_OBJECT_DIRECTORY
+      press("]C")
+      H.eq(2, session.current_group)
+      H.ok(table.concat(buffer_lines(session.main_win), "\n"):find("no changes of its own", 1, true))
+      session:jump_file(session.files[1])
+      api.nvim_set_current_win(session.tree.win)
+      for row, entry in ipairs(session.tree.entries) do
+        if entry.group == 2 then
+          api.nvim_win_set_cursor(session.tree.win, { row, 0 })
+          break
+        end
+      end
+      press("<CR>")
+      H.eq(2, session.current_group, "Files can select a header-only merge")
+      press("gf")
+      H.eq(nil, session.focus_id, "gf must leave a fileless focused group")
+      H.eq(2, session.current_group, "stream retains the empty group anchor")
+      session:toggle_layout()
+      H.eq(2, session.current_group)
+      press("gm")
+      H.ok(vim.wait(3000, function()
+        return session.snapshot.commits_view == "combined"
+      end, 10))
+      H.eq(0, vim.fn.isdirectory(directory))
+    end, {
+      fixture = function(root)
+        H.write(root, "a", { "base" })
+        H.commit(root)
+        H.command({ "git", "checkout", "-qb", "feature" }, root)
+        H.write(root, "a", { "own" })
+        H.commit(root)
+        H.command({ "git", "checkout", "-q", "main" }, root)
+        H.write(root, "trunk", { "trunk" })
+        H.commit(root)
+        H.command({ "git", "checkout", "-q", "feature" }, root)
+        H.command({ "git", "merge", "--no-ff", "-qm", "merge main", "main" }, root)
+        return {}, {}
+      end,
+      real_git = true,
+      columns = 240,
+      view = { mode = "branch", commits_view = "commits", view = "focus" },
+    })
+  end,
+
   ["Tab cycles actual files in stream and focus while gs changes layout"] = function()
     with_review(function(session)
       place(session, "new", 4)
@@ -1386,6 +1554,15 @@ return {
       rill.open_commits({ "HEAD" })
       H.eq("commits", captured.commits_view)
       rill.open_commits({ "HEAD" }, { view = "combined" })
+      H.eq("combined", captured.commits_view)
+      rill.setup({ view = "focus" })
+      rill.open_branch({ view = "commits" })
+      H.eq("commits", captured.commits_view)
+      H.eq("focus", captured.view)
+      rill.setup({ commits_view = "commits" })
+      rill.open_branch()
+      H.eq("commits", captured.commits_view)
+      rill.open_branch({ view = "combined" })
       H.eq("combined", captured.commits_view)
       rill.setup({ view = "focus" })
       rill.open_working()
