@@ -1790,22 +1790,19 @@ local function load_branch(owner, root, options, branch, done)
                     files[#files + 1] = meta
                   end
                 end
-                done(
-                  nil,
-                  {
-                    root = root,
-                    options = options,
-                    label = label,
-                    left = branch.left,
-                    right = branch.right,
-                    branch = branch,
-                    groups = groups,
-                    files = files,
-                    commits_view = "commits",
-                    combined = true,
-                    dispose = dispose,
-                  }
-                )
+                done(nil, {
+                  root = root,
+                  options = options,
+                  label = label,
+                  left = branch.left,
+                  right = branch.right,
+                  branch = branch,
+                  groups = groups,
+                  files = files,
+                  commits_view = "commits",
+                  combined = true,
+                  dispose = dispose,
+                })
               end)
             end)
           end)

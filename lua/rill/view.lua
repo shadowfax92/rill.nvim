@@ -842,8 +842,33 @@ function Session:load(opts)
   -- Cached branch endpoints belong to a gm flip, never to a later refresh.
   self.opts._branch = nil
   self.error = nil
+  local anchor_source
   self:request(function(done)
-    return require("rill.git").load(load_options, done)
+    local cancelled, cancel_load = false, nil
+    local function load()
+      if not cancelled then
+        cancel_load = require("rill.git").load(load_options, done)
+      end
+    end
+    local file = anchor and anchor.line and self.by_id[anchor.file_id]
+    if file and self.snapshot and load_options.commits_view ~= self.snapshot.commits_view then
+      -- Retain the old coordinate space before replacing its snapshot/object
+      -- store. This reader shares the load generation and source-cache budgets.
+      self:ensure_source(file, function(failure)
+        if not failure then
+          anchor_source = file[anchor.side == "old" and "old_source" or "new_source"]
+        end
+        load()
+      end)
+    else
+      load()
+    end
+    return function()
+      cancelled = true
+      if cancel_load then
+        cancel_load()
+      end
+    end
   end, function(err, snapshot)
     if self.closed or generation ~= self.generation then
       if snapshot and snapshot.dispose then
@@ -859,6 +884,12 @@ function Session:load(opts)
       notify(self.error, vim.log.levels.ERROR)
       return
     end
+    -- The old document stays visible while Git loads, so viewport hydration
+    -- may have started more readers. Stop them before releasing its objects.
+    for _, cancel in pairs(self.jobs) do
+      pcall(cancel)
+    end
+    self.jobs = {}
     local previous, files, by_id, focus_index = {}, {}, {}, nil
     for index, file in ipairs(self.files) do
       previous[file.meta.id] = file
@@ -951,23 +982,45 @@ function Session:load(opts)
         self:commit_keys(buf)
       end
     end
-    -- A source line can become unchanged context in the other presentation.
-    -- Hydrate only the anchored file if the compact patch no longer shows it.
+    -- The same path may have different source coordinates in each view: a
+    -- clean merge can add upstream lines without contributing a file group.
+    -- Translate from the retained old source, then reveal the mapped context.
     if switching and target and target.line and by_id[target.file_id] then
-      local visible = false
-      for _, row in ipairs(self.rows) do
-        local cell = target.side == "old" and row.old or row.new
-        if row.file == by_id[target.file_id] and cell and cell.line == target.line then
-          visible = true
-        end
-      end
-      if not visible then
-        local file = by_id[target.file_id]
-        self:ensure_source(file, function(failure)
-          if not failure then
-            require("rill.model").expand_all(file)
-            self:render(target)
+      local file = by_id[target.file_id]
+      local function visible()
+        for _, row in ipairs(self.rows) do
+          local cell = target.side == "old" and row.old or row.new
+          if row.file == file and cell and cell.line == target.line then
+            return true
           end
+        end
+        return false
+      end
+      if anchor_source or not visible() then
+        local projected = self:anchor()
+        self:ensure_source(file, function(failure)
+          -- Source reads are async. Navigation made while they run wins over
+          -- this restoration; otherwise a delayed gm could pull the cursor back.
+          local current = self:anchor()
+          if
+            failure
+            or not projected
+            or not current
+            or current.file_id ~= projected.file_id
+            or current.line ~= projected.line
+            or current.kind ~= projected.kind
+            or current.side ~= projected.side
+          then
+            return
+          end
+          if anchor_source then
+            local after = file[target.side == "old" and "old_source" or "new_source"]
+            target.line = require("rill.source").translate_line(anchor_source, after, target.line)
+          end
+          if not visible() then
+            require("rill.model").expand_all(file)
+          end
+          self:render(target)
         end)
       end
     end
@@ -1030,15 +1083,15 @@ function Session:toggle_focus()
   -- preference must not override it on a later refresh.
   self.pending_focus = false
   local file = self:current()
-  if not file then
-    return
-  end
   local anchor = self:anchor()
   if self.focus_id then
     self.focus_id = nil
-    self:render(self.stream_anchor or anchor)
+    self:render(file and self.stream_anchor or anchor)
     self.stream_anchor = nil
   else
+    if not file then
+      return
+    end
     self.stream_anchor = anchor
     self.focus_id = file.meta.id
     self:render(

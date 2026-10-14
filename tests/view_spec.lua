@@ -398,6 +398,59 @@ local function without_files(snapshot, keep)
 end
 
 return {
+  ["branch gm maps source lines across upstream insertions on both sides"] = function()
+    for _, layout in ipairs({ "stream", "focus" }) do
+      for _, side in ipairs({ "old", "new" }) do
+        with_review(function(session)
+          place(session, side, 25, "a")
+          local function flip(view_mode, line)
+            press("gm")
+            H.ok(
+              vim.wait(3000, function()
+                local anchor = session:anchor()
+                return session.snapshot.commits_view == view_mode and anchor and anchor.line == line
+              end, 10),
+              "gm must translate the anchored source line"
+            )
+            local row = session.rows[api.nvim_win_get_cursor(api.nvim_get_current_win())[1]]
+            H.eq(side == "new" and "feature change" or "base 20", row[side].text)
+          end
+          flip("commits", 20)
+          flip("combined", 25)
+        end, {
+          fixture = function(root)
+            local lines = {}
+            for i = 1, 30 do
+              lines[i] = "base " .. i
+            end
+            H.write(root, "a", lines)
+            H.commit(root)
+            H.command({ "git", "checkout", "-qb", "feature" }, root)
+            lines[20] = "feature change"
+            H.write(root, "a", lines)
+            H.commit(root)
+            H.command({ "git", "checkout", "-q", "main" }, root)
+            local upstream = {}
+            for i = 1, 5 do
+              upstream[i] = "inserted " .. i
+            end
+            for i = 1, 30 do
+              upstream[#upstream + 1] = "base " .. i
+            end
+            H.write(root, "a", upstream)
+            H.commit(root)
+            H.command({ "git", "checkout", "-q", "feature" }, root)
+            H.command({ "git", "merge", "--no-ff", "-qm", "merge main", "main" }, root)
+            return {}, {}
+          end,
+          real_git = true,
+          columns = 240,
+          view = { mode = "branch", view = layout, layout = "split" },
+        })
+      end
+    end
+  end,
+
   ["branch gm retains position and marker Enter uses the worktree"] = function()
     with_review(function(session, env)
       H.eq("combined", session.snapshot.commits_view)
@@ -480,6 +533,9 @@ return {
       end
       press("<CR>")
       H.eq(2, session.current_group, "Files can select a header-only merge")
+      press("gf")
+      H.eq(nil, session.focus_id, "gf must leave a fileless focused group")
+      H.eq(2, session.current_group, "stream retains the empty group anchor")
       session:toggle_layout()
       H.eq(2, session.current_group)
       press("gm")
