@@ -52,7 +52,12 @@ function M.open_unstaged(opts)
   return M.open(vim.tbl_extend("force", opts or {}, { mode = "unstaged" }))
 end
 function M.open_branch(opts)
-  return M.open(vim.tbl_extend("force", opts or {}, { mode = "branch" }))
+  opts = vim.tbl_extend("force", opts or {}, { mode = "branch" })
+  -- Branches share the commit-presentation override with explicit selections.
+  if opts.view == "combined" or opts.view == "commits" then
+    opts.commits_view, opts.view = opts.view, nil
+  end
+  return M.open(opts)
 end
 function M.open_commit(rev, opts)
   return M.open(vim.tbl_extend("force", opts or {}, { mode = "commit", rev = rev or "HEAD" }))

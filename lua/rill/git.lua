@@ -54,6 +54,12 @@ local function scope(callback)
       return
     end
     self.completed = true
+    if err then
+      for cleanup in pairs(self.cleanups) do
+        cleanup()
+      end
+      self.cleanups = {}
+    end
     self:deliver(callback, err, result)
   end
 
@@ -88,7 +94,7 @@ local function scope(callback)
       text = false, -- Source and patch CRLF/EOF bytes are part of the snapshot.
       stdin = opts.stdin,
       timeout = opts.timeout or DEFAULTS.timeout,
-      env = { GIT_OPTIONAL_LOCKS = "0", LC_ALL = "C" },
+      env = vim.tbl_extend("force", { GIT_OPTIONAL_LOCKS = "0", LC_ALL = "C" }, opts.env or {}),
       stdout = function(err, data)
         if self.cancelled or failure then
           return
@@ -437,6 +443,7 @@ local function branch_base(owner, root, head, options, done)
     local function deliver(oid, label)
       local right = endpoint("worktree")
       right.branch = name
+      right.head = head
       done(nil, endpoint("commit", oid, label), right)
     end
     owner:run(
@@ -720,6 +727,12 @@ end
 
 local function endpoints(owner, root, options, done)
   local mode = options.mode
+  -- gm pins the resolved base and HEAD. A regular refresh resolves them anew.
+  if mode == "branch" and options._branch then
+    assert(root == options._branch.root, "Branch snapshot belongs to another repository")
+    done(nil, options._branch.left, options._branch.right)
+    return
+  end
   local function head_or_empty(callback)
     resolve(owner, root, "HEAD", options, function(err, oid)
       if oid then
@@ -792,6 +805,7 @@ local function endpoints(owner, root, options, done)
           end
           local right = mode == "branch" and endpoint("worktree") or endpoint("commit", head_oid, head)
           right.branch = mode == "branch" and head or nil
+          right.head = mode == "branch" and head_oid or nil
           if options.merge_base == true or (mode == "branch" and options.merge_base ~= false) then
             owner:run(root, { "merge-base", base_oid, head_oid }, options, function(merge_err, output)
               done(
@@ -1154,7 +1168,7 @@ local function compare(owner, root, left, right, options, spent, done)
   )
 end
 
-local COMMIT_FIELDS = 5 -- %H %P %an %ad %s, each NUL-terminated by the format/-z
+local COMMIT_FIELDS = 6 -- %H %P %an %ad %s %T, NUL-terminated by the format/-z
 
 -- Subject/author/date/parents for every resolved commit in one process. Object IDs
 -- go through stdin so a long selection cannot exceed the argument-size limit.
@@ -1169,7 +1183,7 @@ local function describe_commits(owner, root, oids, options, done)
     "--encoding=UTF-8",
     "-z",
     "--date=format:%d %b %Y",
-    "--format=%H%x00%P%x00%an%x00%ad%x00%s",
+    "--format=%H%x00%P%x00%an%x00%ad%x00%s%x00%T",
   }, { stdin = table.concat(oids, "\n") .. "\n", timeout = options.timeout }, function(err, output)
     if err then
       done(err)
@@ -1183,6 +1197,7 @@ local function describe_commits(owner, root, oids, options, done)
         author = fields[start + 2],
         date = fields[start + 3],
         subject = fields[start + 4],
+        tree = fields[start + 5],
       }
     end
     done(nil, described)
@@ -1485,9 +1500,331 @@ local function load_commits(owner, root, options, done)
   resolve_item(1)
 end
 
+-- Tree-pair stdin gives every diff an unambiguous header, including empty diffs.
+-- Consume NUL metadata before looking for the next header: a filename may contain
+-- newlines and resemble a header, whereas every patch source line has a prefix.
+-- Each inner parser retains only its budget; the outer reader keeps a short tail.
+local function compare_branch_groups(owner, root, groups, options, env, done)
+  if #groups == 0 then
+    done(nil, 0)
+    return
+  end
+  local input, headers = {}, {}
+  for i, group in ipairs(groups) do
+    headers[i] = group.left_tree .. " " .. group.right_tree .. "\n"
+    input[i] = headers[i]
+  end
+  local index, pending, phase, spent, stream = 1, "", "header", 0, nil
+  local function finish_group()
+    local group = groups[index]
+    group.snapshot.files = stream.finish()
+    spent = spent + stream.bytes
+    if group.auto_merge and #group.snapshot.files == 0 then
+      group.note = "no changes of its own"
+    end
+    index, phase, stream = index + 1, "header", nil
+  end
+  local function feed(data)
+    pending = pending .. data
+    while index <= #groups do
+      if phase == "header" then
+        local header = headers[index]
+        if #pending < #header then
+          return
+        end
+        assert(pending:sub(1, #header) == header, "Invalid branch diff header")
+        pending, phase = pending:sub(#header + 1), "metadata"
+        stream = diff_stream(options, spent)
+      elseif phase == "metadata" then
+        if pending == "" then
+          return
+        end
+        if pending:sub(1, 1) ~= ":" then
+          -- The next tree pair immediately follows a comparison with no files.
+          finish_group()
+        else
+          local boundary = pending:find("\0\0", 1, true)
+          assert(
+            (boundary or #pending) <= options.max_metadata_bytes,
+            "Git metadata exceeds max_metadata_bytes"
+          )
+          if not boundary then
+            return
+          end
+          stream.feed(pending:sub(1, boundary + 1))
+          pending, phase = pending:sub(boundary + 2), "patch"
+        end
+      else
+        local next_header = headers[index + 1]
+        local boundary = next_header and pending:find("\n" .. next_header, 1, true)
+        if boundary then
+          stream.feed(pending:sub(1, boundary))
+          pending = pending:sub(boundary + 1)
+          finish_group()
+        else
+          local amount = next_header and math.max(0, #pending - #next_header - 1) or #pending
+          stream.feed(pending:sub(1, amount))
+          pending = pending:sub(amount + 1)
+          return
+        end
+      end
+    end
+    assert(pending == "", "Unexpected trailing branch diff output")
+  end
+  local args = diff_args(endpoint("index"), endpoint("worktree"), options.paths)
+  args[1] = "diff-tree"
+  table.insert(args, 2, "--stdin")
+  table.insert(args, 3, "-r")
+  owner:run(
+    root,
+    args,
+    { stdin = table.concat(input), sink = feed, env = env, timeout = options.timeout },
+    function(err)
+      if err then
+        done(err)
+        return
+      end
+      local ok, failure = pcall(function()
+        if stream then
+          stream.feed(pending)
+          pending = ""
+          finish_group()
+        end
+        assert(index == #groups + 1 and pending == "", "Incomplete branch diff output")
+      end)
+      done(not ok and tostring(failure) or nil, spent)
+    end
+  )
+end
+
+-- merge-tree writes objects even though this is a read-only review. The request
+-- owns a private object directory with the repository as an alternate. Ownership
+-- passes to the snapshot on success: source hydration needs conflict-marker blobs
+-- until the session replaces/closes it. Cancellation and failure delete it too.
+local function branch_merge_trees(owner, root, groups, options, done)
+  local merges, input = {}, {}
+  for _, group in ipairs(groups) do
+    if #group.parents == 2 then
+      merges[#merges + 1] = group
+      input[#input + 1] = table.concat(group.parents, " ")
+    elseif #group.parents > 2 then
+      group.note = "octopus merge · vs 1st parent"
+    end
+  end
+  if #merges == 0 then
+    done()
+    return
+  end
+  owner:run(
+    root,
+    { "rev-parse", "--path-format=absolute", "--git-path", "objects" },
+    options,
+    function(err, output)
+      if err then
+        done(err)
+        return
+      end
+      local directory = vim.fn.tempname()
+      vim.fn.mkdir(directory .. "/info", "p")
+      -- Git alternates accept C-quoted paths, including whitespace/newlines.
+      vim.fn.writefile({ vim.json.encode((output:gsub("\n$", ""))) }, directory .. "/info/alternates")
+      local disposed = false
+      local function dispose()
+        if not disposed then
+          disposed = true
+          vim.fn.delete(directory, "rf")
+        end
+      end
+      owner.cleanups[dispose] = true
+      local env = { GIT_OBJECT_DIRECTORY = directory }
+      owner:run(root, { "merge-tree", "--write-tree", "--stdin", "--name-only", "--no-messages" }, {
+        stdin = table.concat(input, "\n") .. "\n",
+        env = env,
+        timeout = options.timeout,
+      }, function(merge_err, data)
+        if merge_err then
+          -- Old Git lacks this protocol. Other failures remain errors rather than
+          -- silently presenting a first-parent diff as a successful auto merge.
+          if
+            merge_err:find("unknown option", 1, true)
+            or merge_err:find("usage: git merge-tree", 1, true)
+            or merge_err:find("not a git command", 1, true)
+          then
+            for _, group in ipairs(merges) do
+              group.note = "merge-tree unavailable · vs 1st parent"
+            end
+            dispose()
+            done()
+          else
+            done(merge_err)
+          end
+          return
+        end
+        local ok, failure = pcall(function()
+          local pos = 1
+          for _, group in ipairs(merges) do
+            local status, tree, path
+            status, pos = token(data, pos)
+            tree, pos = token(data, pos)
+            assert(
+              (status == "0" or status == "1") and tree:match("^[0-9a-f]+$"),
+              "Invalid merge-tree record"
+            )
+            repeat
+              path, pos = token(data, pos)
+            until path == ""
+            group.left_tree, group.auto_merge = tree, true
+            group.note = "merge resolutions and edits"
+            group.snapshot.left = endpoint("tree", tree, "automatic merge")
+            group.snapshot.git_env = env
+          end
+          assert(pos == #data + 1, "Unexpected merge-tree output")
+        end)
+        done(not ok and tostring(failure) or nil, env, dispose)
+      end)
+    end
+  )
+end
+
+-- Branch history is a first-parent walk, unlike an explicit commit selection.
+-- One metadata query, one merge-tree batch, and one diff-tree batch cover every
+-- commit. HEAD -> worktree is a separate final group so staged/unstaged/untracked
+-- edits never acquire a historical commit identity or source coordinate.
+local function load_branch(owner, root, options, branch, done)
+  local groups, files = {}, {}
+  local label = "Branch " .. (branch.right.branch or "HEAD") .. " vs " .. branch.left.label
+  owner:run(
+    root,
+    { "rev-list", "--reverse", "--first-parent", "--parents", branch.left.rev .. ".." .. branch.right.head },
+    options,
+    function(err, output)
+      if err then
+        done(err)
+        return
+      end
+      local oids, seen, order = {}, {}, {}
+      for line in output:gmatch("[^\n]+") do
+        local ids = vim.split(line, " ", { trimempty = true })
+        order[#order + 1] = ids[1]
+        for _, oid in ipairs(ids) do
+          if not seen[oid] then
+            oids[#oids + 1], seen[oid] = oid, true
+          end
+        end
+      end
+      local function described(metadata_err, info)
+        if metadata_err then
+          done(metadata_err)
+          return
+        end
+        for index, oid in ipairs(order) do
+          local entry = info[oid]
+          if not entry or not entry.parents[1] or not info[entry.parents[1]] then
+            done("Branch history has no available first parent for " .. oid)
+            return
+          end
+          local left, right =
+            endpoint("commit", entry.parents[1], oid:sub(1, 8) .. "^"), endpoint("commit", oid, oid:sub(1, 8))
+          groups[index] = {
+            index = index,
+            oid = oid,
+            short = oid:sub(1, 8),
+            subject = entry.subject,
+            author = entry.author,
+            date = entry.date,
+            parents = entry.parents,
+            merge = #entry.parents > 1,
+            chain_order = #order - index + 1,
+            left_tree = info[entry.parents[1]].tree,
+            right_tree = entry.tree,
+            snapshot = {
+              root = root,
+              options = options,
+              label = left.label .. " → " .. right.label,
+              left = left,
+              right = right,
+            },
+          }
+        end
+        branch_merge_trees(owner, root, groups, options, function(merge_err, env, dispose)
+          if merge_err then
+            done(merge_err)
+            return
+          end
+          compare_branch_groups(owner, root, groups, options, env, function(diff_err, spent)
+            if diff_err then
+              done(diff_err)
+              return
+            end
+            local left, right = endpoint("commit", branch.right.head, "HEAD"), endpoint("worktree")
+            compare(owner, root, left, right, options, spent, function(work_err, metas, retained)
+              if work_err then
+                done(work_err)
+                return
+              end
+              local working = {
+                root = root,
+                options = options,
+                label = "Uncommitted changes",
+                left = left,
+                right = right,
+                files = metas,
+              }
+              load_untracked(owner, working, spent + retained, function(untracked_err)
+                if untracked_err then
+                  done(untracked_err)
+                  return
+                end
+                if #working.files > 0 then
+                  groups[#groups + 1] = {
+                    index = #groups + 1,
+                    kind = "uncommitted",
+                    subject = "Uncommitted changes",
+                    chain_order = 0,
+                    snapshot = working,
+                  }
+                end
+                for _, group in ipairs(groups) do
+                  for _, meta in ipairs(group.snapshot.files) do
+                    meta.group, meta.id = group.index, (group.oid or "worktree") .. ":" .. meta.path
+                    files[#files + 1] = meta
+                  end
+                end
+                done(
+                  nil,
+                  {
+                    root = root,
+                    options = options,
+                    label = label,
+                    left = branch.left,
+                    right = branch.right,
+                    branch = branch,
+                    groups = groups,
+                    files = files,
+                    commits_view = "commits",
+                    combined = true,
+                    dispose = dispose,
+                  }
+                )
+              end)
+            end)
+          end)
+        end)
+      end
+      if #oids == 0 then
+        described(nil, {})
+      else
+        describe_commits(owner, root, oids, options, described)
+      end
+    end
+  )
+end
+
 --- Load one comparison without moving refs, touching the index, or opening buffers.
 --- Returned commit endpoints and index blob IDs stay pinned even if Git changes
 --- afterward. Worktree sources are mutable and must pass model hydration checks.
+--- Branch snapshots may own automatic-merge objects: call snapshot.dispose(), if
+--- present, after canceling source readers when replacing/closing the snapshot.
 function M.load(opts, callback)
   local owner = scope(callback)
   local options = defaults(opts)
@@ -1520,6 +1857,11 @@ function M.load(opts, callback)
         owner:finish(endpoint_err)
         return
       end
+      local branch = options.mode == "branch" and { root = root, left = left, right = right } or nil
+      if branch and options.commits_view == "commits" then
+        load_branch(owner, root, options, branch, ready)
+        return
+      end
       compare(owner, root, left, right, options, 0, function(diff_err, files, retained)
         if diff_err then
           owner:finish(diff_err)
@@ -1534,6 +1876,9 @@ function M.load(opts, callback)
           right = right,
           files = files,
           options = options,
+          branch = branch,
+          commits_view = branch and "combined" or nil,
+          combined = branch and true or nil,
         }
         if right.kind == "worktree" then
           load_untracked(owner, snapshot, retained, function(err)
@@ -1602,7 +1947,7 @@ function M.source(snapshot, meta, side, callback)
         owner:run(
           snapshot.root,
           { "cat-file", "blob", oid },
-          { limit = options.max_file_bytes, timeout = options.timeout },
+          { limit = options.max_file_bytes, timeout = options.timeout, env = snapshot.git_env },
           function(err, text)
             received(err, text, "blob:" .. oid)
           end

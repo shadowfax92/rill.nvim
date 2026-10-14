@@ -121,11 +121,18 @@ local function entries(files, groups, folded)
         key = key,
         file = root.first,
         prefix = "",
-        label = escape(("%d/%d %s %s"):format(index, #groups, group.short, group.subject)),
+        label = escape(
+          require("rill.group").label(index, require("rill.group").commit_count(groups), group, "tree")
+        ),
       }
       if not folded[key] then
-        if #root.order == 0 then
-          result[#result + 1] = { placeholder = true, prefix = "  ", label = "(no changes)", parent = key }
+        if #root.order == 0 and not group.auto_merge then
+          result[#result + 1] = {
+            placeholder = true,
+            prefix = "  ",
+            label = "(" .. (group.note or "no changes") .. ")",
+            parent = key,
+          }
         end
         visit(root, "  ", key)
       end
@@ -489,7 +496,7 @@ function Tree:activate()
   local entry = self:selected()
   if entry and entry.directory then
     self:toggle(entry)
-  elseif entry and entry.file and self.on_select then
+  elseif entry and (entry.file or entry.group) and self.on_select then
     self.on_select(entry)
   end
 end
