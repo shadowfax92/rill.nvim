@@ -95,6 +95,45 @@ local function merge_history(root)
 end
 
 return {
+  branch_base_label_prefers_trunk_over_a_later_release_branch = function()
+    fixture(function(root)
+      H.write(root, "base", { "base" })
+      local base = H.commit(root)
+      H.command({ "git", "checkout", "-qb", "feature" }, root)
+      H.write(root, "own", { "feature" })
+      H.commit(root)
+      H.command({ "git", "checkout", "-q", "main" }, root)
+      H.write(root, "upstream", { "later main" })
+      H.commit(root)
+      H.command({ "git", "branch", "aaa-release" }, root)
+      H.write(root, "upstream", { "newest main" })
+      local trunk = H.commit(root)
+      H.command({ "git", "update-ref", "refs/remotes/origin/main", trunk }, root)
+      H.command({ "git", "checkout", "-q", "feature" }, root)
+      local function check(label)
+        local snapshot = load(root, { mode = "branch" })
+        H.eq(base, snapshot.left.rev, "label preference must not move the base")
+        H.eq(label, snapshot.left.label)
+        H.eq("Branch feature vs " .. label .. " · commits + uncommitted", snapshot.label)
+        H.eq({ "own" }, paths(snapshot.files))
+      end
+      check("main")
+      H.command({ "git", "branch", "zzz-parent", base }, root)
+      check("main") -- Trunk also outranks a ref pointing exactly at the base.
+      H.command({ "git", "branch", "-D", "main" }, root)
+      check("origin/main") -- Remote trunk beats both local non-trunk candidates.
+      H.command({ "git", "update-ref", "-d", "refs/remotes/origin/main" }, root)
+      H.command({ "git", "update-ref", "refs/remotes/origin/zzz-parent", base }, root)
+      check("zzz-parent")
+      H.command({ "git", "branch", "-D", "zzz-parent" }, root)
+      check("origin/zzz-parent") -- An exact remote tip beats a containing local ref.
+      H.command({ "git", "update-ref", "-d", "refs/remotes/origin/zzz-parent" }, root)
+      H.command({ "git", "branch", "bbb-release", trunk }, root)
+      H.command({ "git", "update-ref", "refs/remotes/origin/000-release", trunk }, root)
+      check("aaa-release") -- Otherwise local refs win, retaining their ref order.
+    end)
+  end,
+
   branch_base_ties_keep_candidate_order_after_merging_sibling_branches = function()
     fixture(function(root)
       H.write(root, "base", { "base" })
