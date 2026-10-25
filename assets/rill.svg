@@ -1,0 +1,8 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="rill">
+  <g stroke-linecap="round" stroke-width="13">
+    <!-- a stream of diff lines: added, removed, added -->
+    <path d="M18 38 C 34 26, 50 26, 64 38 S 94 50, 110 38" stroke="#2EA043"/>
+    <path d="M18 64 C 34 52, 50 52, 64 64 S 94 76, 110 64" stroke="#E5534B"/>
+    <path d="M18 90 C 34 78, 50 78, 64 90 S 94 102, 110 90" stroke="#3FB950"/>
+  </g>
+</svg>

@@ -1,330 +1,70 @@
-# Rill
+<div align="center">
 
-A native Git review surface for Neovim. Read changed files in one continuous
-unified diff, switch to side-by-side with **gs**, or focus one file with **gf**.
-Layout and file focus are independent, and `view = "focus"` opens every review
-on its first file. Several commits open as one combined diff; **gm** switches
-to each commit against its own parent.
+<img src="assets/rill.svg" width="120" alt="rill">
 
-Rill is a read-only review document. **Enter** always opens the real working file in a normal editing window.
-It reuses the launch window, including an empty start screen or dashboard, when
-safe; sidebars stay intact. Files keep your normal editing options, and opening
-a new file tab does not add an empty buffer to the bufferline.
-Historical lines are mapped through later edits (including unsaved buffer edits);
-changed or deleted lines use the nearest surviving line with a brief notice.
-Git renames are followed; deleted files produce a message and open nothing. Source paths, revisions, and line numbers stay attached to
-the code across layout changes, context expansion, and Sidekick selections.
+# rill.nvim
 
-Requires **Neovim 0.11+** and **Git**. There are no required Lua dependencies.
-Installed Tree-sitter parsers provide optional syntax highlighting; Sidekick is
-an optional integration.
+**Native Git review for Neovim.**
+
+[![Neovim 0.11+](https://img.shields.io/badge/Neovim-0.11%2B-57A143?logo=neovim&logoColor=white)](https://neovim.io)
+[![Lua](https://img.shields.io/badge/built%20with-Lua-2C2D72)](https://www.lua.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
+
+Read every changed file as one continuous diff, switch to side-by-side with
+`gs`, or focus one file with `gf`. `Enter` opens the real line in your working
+file, even after later edits.
+
+- **Any comparison**: working tree, staged, branch, one commit, a range, or several commits
+- **Unified or split**, with expandable context and Tree-sitter syntax
+- **Branch review by commit**: `gm` steps through each commit, merges included
+- **Sidekick-aware**: selections send exact source paths and lines to your agent
+
+Requires Neovim 0.11+ and Git. No Lua dependencies.
 
 ## Install
 
-With lazy.nvim:
+lazy.nvim:
 
 ```lua
-return {
-  {
-    "shadowfax92/rill.nvim",
-    main = "rill",
-    cmd = { "Rill", "RillClose", "RillToggle", "RillFocus", "RillRefresh" },
-    opts = {},
-    keys = {
-      { "<leader>gd", "<cmd>Rill<cr>", desc = "Review working changes" },
-      { "<leader>gb", "<cmd>Rill branch<cr>", desc = "Review branch changes" },
-    },
+{
+  "shadowfax92/rill.nvim",
+  main = "rill",
+  cmd = { "Rill", "RillClose", "RillToggle", "RillFocus", "RillRefresh" },
+  opts = {},
+  keys = {
+    { "<leader>gd", "<cmd>Rill<cr>", desc = "Review working changes" },
+    { "<leader>gb", "<cmd>Rill branch<cr>", desc = "Review branch changes" },
   },
 }
 ```
 
-For local development, add `dir` to the plugin spec. This prefers a checkout
-when present and otherwise installs from GitHub:
+## Usage
 
-```lua
-dir = vim.fn.isdirectory(vim.fn.expand("~/code/side-projects/rill.nvim")) == 1
-  and vim.fn.expand("~/code/side-projects/rill.nvim") or nil,
-```
-
-Open `:Rill`: **Tab / Shift-Tab** move between files, **gs** switches layout,
-and **gf** focuses a file. The top bar keeps these actions and context/source
-shortcuts visible; **g?** opens the full key list.
-
-The companion personal Neovim configuration supplies asynchronous Telescope
-commit pickers (`<leader>go`, and file / folder / repository history at
-`<leader>gh`): Tab marks commits and Enter reviews every marked commit with
-`open_commits`, combined when the selection is contiguous; **gm** shows each commit. These global mappings belong to that
-configuration; Rill itself installs only review-buffer mappings.
-
-## Comparisons
-
-| Command | Comparison |
+| Command | Compares |
 | --- | --- |
-| `:Rill` or `:Rill working` | HEAD → files on disk, including untracked files |
+| `:Rill` | HEAD → working tree, untracked files included |
 | `:Rill staged` | HEAD → index |
-| `:Rill unstaged` | Index → files on disk, including untracked files |
-| `:Rill branch [base]` | Branch point → working tree, including untracked files |
-| `:Rill commit [rev]` | First parent → commit; defaults to HEAD |
-| `:Rill range <base> <head>` | Base snapshot → head snapshot |
-| `:Rill A..B` | Same direct snapshot comparison |
-| `:Rill A...B` | Merge base of A and B → B |
-| `:Rill <rev>` | Shorthand for `:Rill commit <rev>` |
-| `:Rill commits <rev>...` | Combined selection; `gm` switches to one section per commit |
-
-Append `--split` or `--unified` to choose the initial layout, and `--focus` or
-`--stream` to choose the initial view. Append
-`-- path/to/file another/path` to restrict the comparison to literal repository-relative paths (files or directories).
-
-Branch mode reviews the whole feature branch, including pushed commits and
-uncommitted work. It finds the closest branch point among other local/remote
-branches and reflog fork points, including stacked parents; the current branch
-and its published remote tracking ref (plus same-named remote copies) are excluded. Only trunk itself (the branch
-named by `origin/HEAD`, otherwise `main` or `master`) uses its configured upstream
-to show unpushed commits plus uncommitted work. An explicit base overrides
-automatic detection. Branch and working comparisons read disk, so save buffer
-edits before reviewing them. Revision comparisons remain pinned to commits. Root commits and unborn repositories use
-an empty-tree baseline where applicable.
-
-## Reviewing
+| `:Rill branch [base]` | branch point → working tree |
+| `:Rill commit [rev]` | parent → commit |
+| `:Rill A..B` / `:Rill A...B` | A → B / merge base → B |
+| `:Rill commits A B C` | several commits, combined when contiguous |
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `Shift-Tab` | Next / previous file, including in file focus |
-| `gs` | Toggle unified / split, preserving source position |
-| `gf` | Focus current file / return to the stream |
-| `gm` | Toggle combined / per commit for a branch or commit selection |
-| `Enter` | Open source; expand a gap; select a tree file or directory |
-| `]f` / `[f` | Next / previous file |
-| `]c` / `[c` | Next / previous hunk |
-| `]C` / `[C` | Next / previous commit (multi-commit reviews) |
-| `zo` / `zB` | Reveal context from the top / bottom of a gap |
-| `zO` | Reveal the whole gap |
-| `zR` | Reveal the entire current file |
-| `zM` | Collapse that file's unchanged context |
-| `za` | Collapse / expand the current file's body; in the tree, fold a commit or directory |
-| `gT` | Hide / show the file tree |
-| `gw` | Toggle wrapping in unified mode |
-| `gr` | Refresh from Git |
-| `g?` | Show key help |
-| `q` | Close the review; in Files, close only the panel |
+| `Tab` / `S-Tab` | next / previous file |
+| `]c` / `[c` | next / previous hunk |
+| `gs` | unified ↔ split |
+| `gf` | focus the file |
+| `gm` | combined ↔ per commit |
+| `Enter` | open the source line, or expand hidden context |
+| `g?` | every key |
+| `q` | close |
 
-The **Files** panel fits its visible entries, up to 60 columns or 40% of the
-screen. Drag its separator or use **Ctrl-w < / >** to resize; **< / >** in the
-panel changes its width by five columns. A manual width lasts for the Neovim
-session, across reviews, panel toggles and layout changes. Automatic fitting
-stops after a manual resize; screen-size bounds still apply.
+Options, the Lua API and Sidekick details are in `:help rill`; internals in
+[docs/architecture.md](docs/architecture.md).
 
-Files has no number or sign columns. It shows directory folds, indent markers,
-file icons from an available MiniIcons/devicons provider (plain fallback), and
-colored Git status glyphs. Long entries use ellipses, preserving filenames ahead
-of directory indentation; commit rows retain their short SHA before the subject.
-**Enter / o / l** select files or expand directories, **h** collapses or moves to
-the parent, **za** folds directories/commits or the selected file body, and
-**g?** shows the panel keys.
-Existing review and Sidekick keys still work there; **gT** reopens a closed panel.
+## License
 
-`tree_width` remains the initial width and the minimum used for automatic
-content fitting (subject to screen bounds). Optional controls:
-
-```lua
-require("rill").setup({
-  tree_width = 30,
-  tree = { adaptive = true, max_width = 60, max_ratio = 0.4, resize_step = 5, icons = true },
-})
-```
-
-Changed lines sit on deep green / red bands, like Claude Code's and delta's
-diffs: `#022800` / `#3d0101` on dark themes, `#d0ffd0` / `#ffe0e0` on light
-ones. Each band runs through the gutter, whose line numbers and `+` / `−` keep
-your theme's diagnostic colors unless they need raising to 4.5:1 contrast on the
-band. Code keeps its syntax colors without character-level patches or extra
-bolding. Dim comments use Rill-only highlight copies targeting 4.5:1 contrast
-against unchanged, added, and deleted lines; your theme's source-buffer
-highlights remain unchanged. Both layouts share this styling, which updates when
-you change colorschemes.
-
-With `view = "focus"` a review opens on its first file, and **Tab** moves to the
-next file without leaving focus. The preference applies once per review: an
-empty comparison stays in the stream until a refresh finds changes, and after
-**gf** returns to the stream, refreshes stay there. When a refresh removes the
-focused file, the file now at its position takes focus.
-
-Each file owns its context expansion. Expanding a file in the stream moves later
-files down; focusing it preserves that expansion. Split mode remains unwrapped
-so paired rows stay aligned.
-
-Code is ordinary scratch-buffer text: motions, visual selection, `/` and `?`,
-and copying work normally. Gutter numbers and change signs are decorations.
-**Search covers materialized text only**; expand hidden context before searching
-it. The gutter shows source line numbers, which differ from review-buffer rows.
-
-## Reviewing a branch by commit
-
-In `:Rill branch` / `<leader>gb`, **gm** switches the combined branch diff to
-oldest-first commits along HEAD's first-parent chain, reusing the resolved base.
-A final **● Uncommitted changes** group contains staged, unstaged and untracked
-changes against HEAD. Clean worktrees have no marker; a branch with no commits
-can show only that marker. **]C / [C** visits every group, including empty merges.
-
-Branch merge groups show the resolutions and manual edits beyond Git's automatic
-merge tree, including its conflict markers. A clean merge is a header-only
-**no changes of its own** marker. Octopus merges and Git versions without
-`merge-tree --write-tree --stdin` use the first-parent diff with an explicit note.
-Git's temporary merge objects live outside the reviewed repository and are
-removed when the review reloads or closes. Explicit commit selections retain
-their existing first-parent merge comparisons.
-
-`commits_view = "commits"` also sets the branch default;
-`open_branch({ view = "commits" })` overrides it for one review. **gm** keeps the
-file/source line, layout and Files width; **gr** refreshes in the current view.
-Enter from a commit maps its source line into the current working file; Enter
-from the uncommitted marker opens that worktree line directly.
-
-## Reviewing several commits
-
-`:Rill commits A B C` or `require("rill").open_commits({ "A", "B", "C" })`
-opens **combined** by default: one diff from the state before the selection to
-its newest commit, with a flat Files list. The title names the selection and
-view, e.g. `3 commits 788d8a40..aa367be0 · combined`.
-
-The newest selected commit must contain all the others. Selected commits on
-its first-parent chain must be consecutive, ignoring commits that do not touch
-the selection's paths. Other selected commits must be brought in by a selected
-merge and not already present before the selection. The base is the first
-parent of the oldest selected chain commit (empty tree for a root). A selected
-merge includes everything it merged, as its own first-parent diff does.
-
-A gap or unrelated selection opens **per commit**, with a short explanation.
-**gm** switches combined ↔ per commit, keeping the current file and source line
-when present; if the selection cannot combine, it explains why. Set
-`commits_view = "commits"` in setup or pass `{ view = "commits" }` to
-`open_commits` to start per commit. `{ view = "combined" }` overrides the setup
-default. Focus/stream remains controlled by setup's `view` (the existing
-`open_commits` focus/stream overrides also work).
-
-In per-commit view, each commit is compared with its own first parent (empty
-tree for a root), in the given order. An add followed by a revert stays visible
-in both groups; in combined view the changes cancel out. Any unresolvable
-revision fails the whole review. Selections stay pinned across refreshes and
-view switches.
-
-Each commit's files follow a commit row:
-
-```
-● 2/3  1a2b3c4d  Subject — Author · 03 Oct 2026 · merge vs 1st parent
-```
-
-`· merge vs 1st parent` and `· root` appear where they apply. In the stream, a
-commit with no changes (in the requested paths) still gets its row, followed by
-`(no changes)`; focus skips it. A path changed by two commits appears in both
-sections. **Tab / Shift-Tab** cross commit boundaries, also in focus, and
-**]C / [C** jump to the first file of the next / previous commit with changes.
-The file tree has a foldable node per commit (`za`; Enter jumps to its first
-file), and the title names the commit under the cursor, e.g.
-`[2/3] 1a2b3c4d Subject`. Enter-to-source and Sidekick context resolve against
-that commit's own revisions.
-
-## Sidekick
-
-With `sidekick = true` (the default), Rill adds these buffer-local mappings:
-
-| Key | Action |
-| --- | --- |
-| `<leader>ai` / `<leader>aI` | Comment with relative / absolute source paths |
-| `<leader>al` / `<leader>aL` | Send source lines with relative / absolute paths |
-| `<leader>af` / `<leader>aF` | Send file paths only |
-| `<leader>at` | Send the current line or selection |
-| `<leader>av` / `<leader>ax` | Send to Claude / Codex without taking focus |
-
-Sidekick is loaded only when a send mapping is invoked. Comment popups require
-a Sidekick version exposing `send_with_comment`, as the local
-`shadowfax-sidekick.nvim` fork does. Set `sidekick = false` to omit these mappings.
-
-Selections resolve to **source paths and source line ranges**, not display rows.
-Deleted code identifies its old revision and old path; new code identifies its
-new revision or worktree/index side. Mixed selections become separate spans for
-each file, side, and contiguous range. Headers, gaps, and split padding do not
-invent source locations. Code and locations are captured before the comment
-popup opens, keeping its preview, draft, and eventual message consistent even if
-the review refreshes. Enter returns to ordinary editing and its normal Sidekick mappings;
-review selections retain their historical addresses. No Sidekick core changes are required.
-
-## Configuration and API
-
-```lua
-require("rill").setup({
-  layout = "unified",
-  view = "stream", -- or "focus": open each review on its first file
-  commits_view = "combined", -- or "commits": default presentation of branches and selections
-  tree_width = 30,
-  context_step = 20,
-  wrap = false, -- unified only
-  syntax = true,
-  syntax_max_lines = 100000,
-  syntax_max_bytes = 1024 * 1024,
-  sidekick = true,
-  max_file_bytes = 1024 * 1024,
-  max_changed_lines = 20000,
-  max_patch_bytes = 16 * 1024 * 1024,
-  source_cache_bytes = 32 * 1024 * 1024,
-})
-
-local rill = require("rill")
-rill.open_working({ cwd = "/path/to/repository" })
-rill.open_staged()
-rill.open_unstaged()
-rill.open_branch({ base = "origin/main" })
-rill.open_commit("HEAD~2")
-rill.open_range("main", "HEAD", { layout = "split", paths = { "src" } })
--- Contiguous selections combine; gm toggles the per-commit view.
--- Per-item paths override opts.paths; combined reviews use the selection's paths.
-rill.open_commits({ "HEAD~2", { rev = "HEAD", paths = { "lua" } } }, { view = "focus" })
-```
-
-Open functions return a session immediately while Git loads asynchronously.
-`toggle()`, `focus()`, `refresh()`, `close()`, and `current()` operate on the
-current review tab. Their command equivalents are `:RillToggle`, `:RillFocus`,
-`:RillRefresh`, and `:RillClose`.
-
-For another integration, use `require("rill").context(ctx)` to translate a
-captured buffer position or selection into `{ root, file, spans }`. Each span
-contains the exact path, revision, side, source line range, byte columns, and
-selected text. See `:help rill-context` for the coordinate contract and
-[docs/architecture.md](docs/architecture.md) for internal module boundaries.
-
-## Performance and current scope
-
-Git processes and source reads are asynchronous and cancellable. Syntax is
-parsed from the full old/new sources, then cached captures are projected only
-onto visible review rows. Capture indexing yields between batches. The source
-cache has a 32 MiB target; visible and explicitly expanded files can pin data
-above that target. Layout changes reuse the review document.
-
-Per-file source and patch reads default to 1 MiB, changed lines to 20,000 per
-file, and retained patches to 16 MiB per review. Full-source reads also have a
-100,000-line ceiling. Syntax defaults match these readable-source limits, so a
-large readable file can finish highlighting instead of stopping at a separate
-small-file cutoff. Captures repaint as soon as indexing completes. Lower
-`syntax_max_lines` / `syntax_max_bytes` if you prefer stricter parser latency.
-Syntax caps captures at 100,000 per side.
-
-Binary files, submodules, file-type changes, unresolved conflicts, and oversized
-changes remain visible as explanatory entries. Large generated files receive
-the same size limits as other files. There is no binary renderer, merge-conflict
-editor, staging action, persistent review-thread store, or editing inside the
-review document. Refresh is explicit with `gr`.
-
-## Development
-
-```sh
-make test
-# Optional: point integration tests at a Sidekick checkout.
-RILL_SIDEKICK_PATH=/path/to/sidekick.nvim make test
-```
-
-With tmux available, the suite also starts an isolated real terminal UI to check
-painted diff backgrounds and delayed syntax without scrolling.
-
-Tests cover real temporary Git repositories, source mapping, layouts and
-expansion, cancellation, syntax, and Sidekick capture without real delivery.
-MIT licensed. Inspired by Hunk and Pierre's diffs.
+MIT. Inspired by Hunk and Pierre's diffs.
