@@ -1875,6 +1875,7 @@ end
 -- Selection ranges use Sidekick's captured buffer coordinates. Group only
 -- contiguous source lines on one side: headers/gaps break spans, and mixed
 -- old/new or multi-file selections must never become one invented file range.
+-- The tree resolves its own row identities to references, without source spans.
 function M.context(ctx)
   local binding = M.buffers[ctx.buf]
   if not binding or binding.session.closed then
@@ -1884,13 +1885,8 @@ function M.context(ctx)
   if not session.snapshot then
     return
   end
-  local row_index = ctx.range and ctx.range.from[1] or ctx.row or 1
   if binding.tree then
-    local entry = session.tree.entries[row_index]
-    if not entry or not entry.file then
-      return
-    end
-    return { root = session.snapshot.root, file = entry.file.meta, spans = {} }
+    return session.tree:context(ctx, session.snapshot)
   end
   local selected = require("rill.selection").rows(ctx)
   local indexes = vim.tbl_keys(selected)

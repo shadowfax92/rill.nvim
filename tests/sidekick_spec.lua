@@ -62,6 +62,42 @@ local function sidekick_available()
 end
 
 return {
+  sidebar_references_keep_folders_renames_deletions_and_commit_meaning = function()
+    local selected = {
+      root = "/repo",
+      label = "Branch feature vs origin/main",
+      spans = {},
+      entries = {
+        { kind = "directory", path = "dir name", revision = "abc12345ffff" },
+        {
+          kind = "file",
+          path = "src/new.lua",
+          old_path = "src/old.lua",
+          status = "R",
+          revision = "abc12345ffff",
+        },
+        { kind = "file", path = "src/gone.lua", status = "D" },
+        { kind = "commit", revision = "abc12345ffff", subject = "Change the folder" },
+        { kind = "uncommitted" },
+      },
+    }
+    local references = table.concat({
+      '@"dir name/" (in abc12345)',
+      "@src/new.lua (renamed from src/old.lua) (in abc12345)",
+      "@src/gone.lua (deleted)",
+      "commit abc12345 Change the folder",
+      "uncommitted changes (worktree vs HEAD)",
+    }, "\n")
+    H.eq("Rill review: Branch feature vs origin/main\n" .. references, Adapter.format(selected))
+    H.eq(references, Adapter.format(selected, { kind = "file" }))
+    local absolute = Adapter.format(selected, { absolute = true })
+    H.ok(absolute:find('@"/repo/dir name/"', 1, true), absolute)
+    H.ok(absolute:find("renamed from /repo/src/old.lua", 1, true), absolute)
+    H.eq(nil, absolute:find(":L", 1, true))
+    selected.entries = {}
+    H.eq("", Adapter.format(selected))
+  end,
+
   mixed_source_spans_keep_their_paths_revisions_and_selected_text = function()
     H.eq(
       table.concat({
@@ -128,96 +164,110 @@ return {
     local Drafts = require("sidekick.cli.comment_drafts")
     local Text = require("sidekick.text")
     local Util = require("sidekick.util")
-    local saved = {
-      rill = package.loaded.rill,
-      with = State.with,
-      open = Comment.open,
-      mark_sent = Drafts.mark_sent,
-      info = Util.info,
-      warn = Util.warn,
-      token = Config.cli.context.rill_review,
-      buf = vim.api.nvim_get_current_buf(),
-    }
-    local buf = vim.api.nvim_create_buf(false, true)
-    local fixture = context()
-    local captured, opened, delivered, draft_message, dispatch
-    local ok, err = xpcall(function()
-      vim.api.nvim_buf_set_name(buf, "rill://sidekick-integration-test")
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "file header", "local old = 1", "return old", "new" })
-      vim.api.nvim_set_current_buf(buf)
-      vim.api.nvim_win_set_cursor(0, { 2, 0 })
-      vim.cmd("normal! Vj")
-      package.loaded.rill = {
-        context = function(ctx)
-          captured = ctx
-          return fixture
-        end,
+    local function roundtrip(fixture)
+      local saved = {
+        rill = package.loaded.rill,
+        with = State.with,
+        open = Comment.open,
+        mark_sent = Drafts.mark_sent,
+        info = Util.info,
+        warn = Util.warn,
+        token = Config.cli.context.rill_review,
+        buf = vim.api.nvim_get_current_buf(),
       }
-      Config.cli.context.rill_review = function()
-        return "previous token"
-      end
-      local previous = Config.cli.context.rill_review
-      local notified
-      Util.warn = function(message)
-        notified = message
-      end
-      Util.info = function() end
-      Comment.open = function(opts)
-        opened = opts
-      end
-      Drafts.mark_sent = function(_, _, message)
-        draft_message = message
-      end
-      State.with = function(use, opts)
-        dispatch = opts
-        use({
-          tool = {
-            format = function(_, text)
-              return Text.to_string(text)
-            end,
-          },
-          session = {
-            send = function(_, message)
-              delivered = message
-            end,
-          },
-        })
-      end
+      local buf = vim.api.nvim_create_buf(false, true)
+      local captured, opened, delivered, draft_message, dispatch
+      local ok, err = xpcall(function()
+        vim.api.nvim_buf_set_name(buf, "rill://sidekick-integration-test")
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "file header", "local old = 1", "return old", "new" })
+        vim.api.nvim_set_current_buf(buf)
+        vim.bo[buf].filetype = fixture.entries and "rill_tree" or "rill"
+        vim.api.nvim_win_set_cursor(0, { 2, 0 })
+        vim.cmd("normal! Vj")
+        package.loaded.rill = {
+          context = function(ctx)
+            captured = ctx
+            return fixture
+          end,
+        }
+        Config.cli.context.rill_review = function()
+          return "previous token"
+        end
+        local previous = Config.cli.context.rill_review
+        local notified
+        Util.warn = function(message)
+          notified = message
+        end
+        Util.info = function() end
+        Comment.open = function(opts)
+          opened = opts
+        end
+        Drafts.mark_sent = function(_, _, message)
+          draft_message = message
+        end
+        State.with = function(use, opts)
+          dispatch = opts
+          use({
+            tool = {
+              format = function(_, text)
+                return Text.to_string(text)
+              end,
+            },
+            session = {
+              send = function(_, message)
+                delivered = message
+              end,
+            },
+          })
+        end
 
-      local expected = Adapter.format(fixture, { absolute = true })
-      H.ok(Adapter.send({ comment = true, absolute = true, filter = { name = "codex" }, focus = false }))
-      H.eq(nil, notified)
-      H.eq(buf, captured.buf)
-      H.eq({ from = { 2, 0 }, to = { 3, vim.v.maxcol }, kind = "line" }, captured.range)
-      H.eq(expected, table.concat(H.ok(opened).context_lines, "\n"))
-      H.eq(previous, Config.cli.context.rill_review)
+        local expected = Adapter.format(fixture, { absolute = true })
+        H.ok(Adapter.send({ comment = true, absolute = true, filter = { name = "codex" }, focus = false }))
+        H.eq(nil, notified)
+        H.eq(buf, captured.buf)
+        H.eq({ from = { 2, 0 }, to = { 3, vim.v.maxcol }, kind = "line" }, captured.range)
+        H.eq(expected, table.concat(H.ok(opened).context_lines, "\n"))
+        H.eq(previous, Config.cli.context.rill_review)
 
-      -- Simulate an agent refresh and a popup moving focus after context capture.
-      fixture.spans[1].lines[1] = "changed after popup"
-      fixture.spans[1].revision = "new revision"
+        -- Simulate an agent refresh and a popup moving focus after context capture.
+        if fixture.entries then
+          fixture.entries[1].path = "changed after popup"
+          fixture.label = "new comparison"
+        else
+          fixture.spans[1].lines[1] = "changed after popup"
+          fixture.spans[1].revision = "new revision"
+        end
+        vim.api.nvim_set_current_buf(saved.buf)
+        opened.cb("Please explain this change", {})
+        H.ok(vim.wait(1000, function()
+          return delivered ~= nil
+        end, 10))
+        H.eq("> Please explain this change\n\n" .. expected, draft_message)
+        H.eq(draft_message .. "\n", delivered)
+        H.eq({ name = "codex" }, dispatch.filter)
+        H.eq(false, dispatch.focus)
+        H.eq(true, dispatch.multicast)
+      end, debug.traceback)
+
+      package.loaded.rill = saved.rill
+      State.with = saved.with
+      Comment.open = saved.open
+      Drafts.mark_sent = saved.mark_sent
+      Util.info = saved.info
+      Util.warn = saved.warn
+      Config.cli.context.rill_review = saved.token
       vim.api.nvim_set_current_buf(saved.buf)
-      opened.cb("Please explain this change", {})
-      H.ok(vim.wait(1000, function()
-        return delivered ~= nil
-      end, 10))
-      H.eq("> Please explain this change\n\n" .. expected, draft_message)
-      H.eq(draft_message .. "\n", delivered)
-      H.eq({ name = "codex" }, dispatch.filter)
-      H.eq(false, dispatch.focus)
-      H.eq(true, dispatch.multicast)
-    end, debug.traceback)
-
-    package.loaded.rill = saved.rill
-    State.with = saved.with
-    Comment.open = saved.open
-    Drafts.mark_sent = saved.mark_sent
-    Util.info = saved.info
-    Util.warn = saved.warn
-    Config.cli.context.rill_review = saved.token
-    vim.api.nvim_set_current_buf(saved.buf)
-    vim.api.nvim_buf_delete(buf, { force = true })
-    if not ok then
-      error(err)
+      vim.api.nvim_buf_delete(buf, { force = true })
+      if not ok then
+        error(err)
+      end
     end
+    roundtrip(context())
+    roundtrip({
+      root = "/repo",
+      label = "Branch feature vs origin/main",
+      spans = {},
+      entries = { { kind = "directory", path = "src/{line}", revision = "abc12345" } },
+    })
   end,
 }

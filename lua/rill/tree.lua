@@ -62,23 +62,37 @@ local function icon(path, enabled)
   return "·", "RillMuted"
 end
 
+-- Position changes when commits arrive or gm rebuilds the groups. Fold state
+-- belongs to the commit itself, including the synthetic worktree marker.
+local function group_key(index, group)
+  return "@" .. (group.oid or (group.kind == "uncommitted" and "worktree") or group.short or tostring(index))
+end
+
 -- Fold keys include the commit group, so repeated paths in a multi-commit
 -- review remain independent. Compact directory chains leave room for filenames.
 local function entries(files, groups, folded)
   local roots = {}
   for i = 1, groups and #groups or 1 do
-    roots[i] = { children = {}, order = {} }
+    roots[i] = { children = {}, order = {}, key = groups and group_key(i, groups[i]) or "" }
   end
   for _, file in ipairs(files) do
     local group = groups and file.meta.group or 1
-    local node, path = roots[group], groups and "@" .. group or ""
+    local node, path, relative = roots[group], groups and roots[group] and roots[group].key or "", ""
     if node then
       node.first = node.first or file
       local parts = vim.split(file.meta.path, "/", { plain = true })
       for i, name in ipairs(parts) do
         path = path == "" and name or path .. "/" .. name
+        relative = relative == "" and name or relative .. "/" .. name
         if not node.children[name] then
-          node.children[name] = { name = name, path = path, children = {}, order = {} }
+          node.children[name] = {
+            name = name,
+            path = path,
+            relative = relative,
+            group_index = groups and group or nil,
+            children = {},
+            order = {},
+          }
           node.order[#node.order + 1] = name
         end
         node = node.children[name]
@@ -101,11 +115,12 @@ local function entries(files, groups, folded)
       end
       local last = index == #node.order
       local prefix = indent .. (last and "└─ " or "├─ ")
-      local entry = { label = escape(label), prefix = prefix, parent = parent }
+      local entry =
+        { label = escape(label), prefix = prefix, parent = parent, group_index = child.group_index }
       if child.file then
         entry.file = child.file
       else
-        entry.directory, entry.key = child.path, child.path
+        entry.directory, entry.key = child.relative, child.path
       end
       result[#result + 1] = entry
       if not child.file and not folded[child.path] then
@@ -115,7 +130,7 @@ local function entries(files, groups, folded)
   end
   if groups then
     for index, group in ipairs(groups) do
-      local key, root = "@" .. index, roots[index]
+      local key, root = roots[index].key, roots[index]
       result[#result + 1] = {
         group = index,
         key = key,
@@ -149,11 +164,20 @@ function Tree:is_open()
   return valid(self.win) and api.nvim_win_get_buf(self.win) == self.buf
 end
 
-function Tree:limits()
-  local maximum = math.max(
-    1,
-    math.min(math.floor(self.options.max_width), math.floor(vim.o.columns * self.options.max_ratio))
-  )
+function Tree:limits(manual)
+  -- Content fitting must not let a long subject take over the review. An
+  -- intentional resize can exceed that cap while leaving 40 columns for code.
+  local maximum = math.max(1, vim.o.columns - 41)
+  if not manual then
+    maximum = math.max(
+      1,
+      math.min(
+        maximum,
+        math.floor(self.options.max_width),
+        math.floor(vim.o.columns * self.options.max_ratio)
+      )
+    )
+  end
   return math.min(20, maximum), maximum
 end
 
@@ -244,6 +268,49 @@ function Tree:buffer()
         end
       end,
     },
+    zA = {
+      "Toggle all tree folds",
+      function()
+        self:fold("toggle", "all")
+      end,
+    },
+    zM = {
+      "Collapse all tree nodes",
+      function()
+        self:fold("close", "all")
+      end,
+    },
+    zR = {
+      "Expand all tree nodes",
+      function()
+        self:fold("open", "all")
+      end,
+    },
+    zo = {
+      "Open tree node",
+      function()
+        self:fold("open", "node")
+      end,
+    },
+    zc = {
+      "Close tree node",
+      function()
+        self:fold("close", "node")
+      end,
+    },
+    zO = {
+      "Open tree subtree",
+      function()
+        self:fold("open", "subtree")
+      end,
+    },
+    zC = {
+      "Close tree subtree",
+      function()
+        self:fold("close", "subtree")
+      end,
+    },
+    zB = { "No diff context action in Files", function() end },
     q = {
       "Close Files panel",
       function()
@@ -257,6 +324,18 @@ function Tree:buffer()
       end,
     },
     ["<"] = {
+      "Narrow Files panel",
+      function()
+        self:resize(-self.options.resize_step)
+      end,
+    },
+    ["}"] = {
+      "Widen Files panel",
+      function()
+        self:resize(self.options.resize_step)
+      end,
+    },
+    ["{"] = {
       "Narrow Files panel",
       function()
         self:resize(-self.options.resize_step)
@@ -298,7 +377,7 @@ function Tree:open(anchor)
     return
   end
   self.anchor = anchor
-  local low, high = self:limits()
+  local low, high = self:limits(preferred_width ~= nil)
   local width = math.max(low, math.min(high, preferred_width or self.initial_width))
   api.nvim_win_call(anchor, function()
     vim.cmd("topleft vertical " .. width .. "split")
@@ -359,8 +438,13 @@ function Tree:resize(delta)
   if not self:is_open() then
     return
   end
-  local low, high = self:limits()
-  preferred_width = math.max(low, math.min(high, api.nvim_win_get_width(self.win) + math.floor(delta)))
+  local low, high = self:limits(true)
+  local actual = api.nvim_win_get_width(self.win)
+  local width = math.max(low, math.min(high, actual + math.floor(delta)))
+  if width == actual then
+    return
+  end
+  preferred_width = width
   self:render()
 end
 
@@ -377,6 +461,12 @@ function Tree:render()
   self.rendering = true
   self:capture_width()
   local prior = self.entries[api.nvim_win_get_cursor(self.win)[1]]
+  local parents = {}
+  for _, entry in ipairs(self.entries) do
+    if entry.key then
+      parents[entry.key] = entry.parent
+    end
+  end
   self.entries = entries(self.data.files or {}, self.data.groups, self.folded)
   local natural = self.initial_width
   for _, entry in ipairs(self.entries) do
@@ -394,7 +484,7 @@ function Tree:render()
     entry.display_prefix = prefix
     natural = math.max(natural, vim.fn.strdisplaywidth(prefix .. entry.label .. (entry.suffix or "")) + 1)
   end
-  local low, high = self:limits()
+  local low, high = self:limits(preferred_width ~= nil)
   local width = math.max(
     low,
     math.min(high, preferred_width or (self.options.adaptive and natural or self.initial_width))
@@ -403,7 +493,7 @@ function Tree:render()
     api.nvim_win_set_width(self.win, width)
   end
   self.width, self.columns = api.nvim_win_get_width(self.win), vim.o.columns
-  local lines, cursor = {}, nil
+  local lines, cursor, by_key = {}, nil, {}
   for index, entry in ipairs(self.entries) do
     local label = entry.label .. (entry.suffix or "")
     local prefix = entry.display_prefix
@@ -424,6 +514,9 @@ function Tree:render()
       label = vim.fn.pathshorten(label)
     end
     lines[index] = prefix .. fit(label, room, not entry.group)
+    if entry.key then
+      by_key[entry.key] = index
+    end
     if
       prior
       and (
@@ -439,6 +532,12 @@ function Tree:render()
     then
       cursor = index
     end
+  end
+  -- A collapsed ancestor removes the old row. Follow its identity through the
+  -- previous parent chain instead of selecting an unrelated row at that number.
+  local parent = prior and prior.parent
+  while not cursor and parent do
+    cursor, parent = by_key[parent], parents[parent]
   end
   if #lines == 0 then
     lines = { fit(self.data.message or "Loading…", self.width - 1, false) }
@@ -461,6 +560,22 @@ function Tree:highlight(current)
     return
   end
   api.nvim_buf_clear_namespace(self.buf, ns, 0, -1)
+  local ancestors = {}
+  for _, file in ipairs(self.data.files or {}) do
+    if file.meta.id == self.current_file then
+      local group = self.data.groups and self.data.groups[file.meta.group]
+      local key = group and group_key(file.meta.group, group) or ""
+      if key ~= "" then
+        ancestors[key] = true
+      end
+      local parts = vim.split(file.meta.path, "/", { plain = true })
+      for i = 1, #parts - 1 do
+        key = key == "" and parts[i] or key .. "/" .. parts[i]
+        ancestors[key] = true
+      end
+      break
+    end
+  end
   for index, entry in ipairs(self.entries) do
     local line = api.nvim_buf_get_lines(self.buf, index - 1, index, false)[1] or ""
     local function span(start, length, hl)
@@ -481,8 +596,11 @@ function Tree:highlight(current)
     if entry.status then
       span(#entry.paint_indent + #entry.symbol + 1, #entry.status[1], entry.status[2])
     end
-    local hl = entry.group and "RillGroup"
-      or entry.file and entry.file.meta.id == self.current_file and "RillTreeCurrent"
+    -- File navigation respects explicit tree folds. Highlight the closed
+    -- ancestor that contains the review's current file instead of reopening it.
+    local selected = not entry.group and entry.file and entry.file.meta.id == self.current_file
+      or entry.key and self.folded[entry.key] and ancestors[entry.key]
+    local hl = selected and "RillTreeCurrent" or entry.group and "RillGroup"
     if hl then
       api.nvim_buf_set_extmark(self.buf, ns, index - 1, 0, { line_hl_group = hl })
     end
@@ -506,6 +624,102 @@ function Tree:toggle(entry)
     self.folded[entry.key] = not self.folded[entry.key]
     self:render()
   end
+end
+
+--- Apply fold operations to the tree projection, independently of diff bodies
+--- and source expansion. Enumerating the fully open projection preserves merged
+--- directory chains and includes descendants hidden by an already closed node.
+function Tree:fold(action, scope)
+  local node = self:selected()
+  if scope ~= "all" and (not node or not node.key) then
+    return
+  end
+  local complete = entries(self.data.files or {}, self.data.groups, {})
+  local close = action == "close"
+  if action == "toggle" then
+    -- Hidden descendants do not make a visibly closed tree open. Direction
+    -- follows the current projection; application still covers every node.
+    for _, entry in ipairs(self.entries) do
+      if entry.key and not self.folded[entry.key] then
+        close = true
+        break
+      end
+    end
+  end
+  if scope == "all" then
+    self.folded = {}
+  else
+    self.folded[node.key] = close or nil
+  end
+  for _, entry in ipairs(complete) do
+    if
+      entry.key
+      and (
+        scope == "all"
+        or entry.key == node.key
+        or scope == "subtree" and entry.key:sub(1, #node.key + 1) == node.key .. "/"
+      )
+    then
+      self.folded[entry.key] = close or nil
+    end
+  end
+  self:render()
+end
+
+--- Snapshot selected tree identities while their row mapping is current. Visual
+--- columns may cover part of a decorated/truncated label; they still identify
+--- whole entries, never source lines or an instruction to traverse directories.
+function Tree:context(ctx, snapshot)
+  local first = ctx.range and math.min(ctx.range.from[1], ctx.range.to[1]) or ctx.row or 1
+  local last = ctx.range and math.max(ctx.range.from[1], ctx.range.to[1]) or first
+  local result = { root = snapshot.root, label = snapshot.label, entries = {}, spans = {} }
+  local seen, selected_file = {}, nil
+  for row = math.max(1, first), math.min(#self.entries, last) do
+    local entry = self.entries[row]
+    local group = snapshot.groups and snapshot.groups[entry.group or entry.group_index]
+    local revision = group and (group.kind == "uncommitted" and "worktree" or group.oid or group.short)
+    local item
+    if entry.group then
+      item = {
+        kind = group.kind == "uncommitted" and "uncommitted" or "commit",
+        revision = revision,
+        subject = group.subject,
+      }
+    elseif entry.directory then
+      item = { kind = "directory", path = entry.directory, revision = revision }
+    elseif entry.file then
+      local meta = entry.file.meta
+      item = {
+        kind = "file",
+        path = meta.path,
+        old_path = meta.old_path,
+        status = meta.status,
+        revision = revision,
+      }
+    end
+    if item then
+      if item.path then
+        item.absolute_path = snapshot.root .. "/" .. item.path
+      end
+      local identity = table.concat({ item.kind, item.path or "", item.revision or "" }, "\0")
+      if not seen[identity] then
+        seen[identity] = true
+        result.entries[#result.entries + 1] = item
+        selected_file = entry.file and entry.file.meta or nil
+      end
+    end
+  end
+  if #result.entries == 0 then
+    return
+  end
+  if #result.entries == 1 then
+    if result.entries[1].kind == "file" then
+      result.file = selected_file
+    elseif result.entries[1].kind == "directory" then
+      result.directory = result.entries[1]
+    end
+  end
+  return result
 end
 function Tree:parent()
   local entry = self:selected()
@@ -535,12 +749,17 @@ function Tree:help()
     "Enter / o / l  Open file / expand directory",
     "h              Collapse / parent",
     "za             Toggle directory / commit / file body",
-    "> / <          Widen / narrow (session-persistent)",
+    "zA             Toggle all tree folds",
+    "zM / zR        Collapse / expand all tree nodes",
+    "zo / zc        Open / close the current tree node",
+    "zO / zC        Open / close its whole subtree",
+    "} / {, > / <   Widen / narrow (session-persistent)",
     "Ctrl-w < / >   Native resize; separator drag also works",
     "q              Close Files panel",
     "gT             Reopen Files panel",
     "",
     "Rill: gm combined / per commit, gs layout, gf focus, gr refresh",
+    "Sidekick: select files/folders/commits; <leader>ai asks about them",
     "",
     "q / Escape     Close help",
   }
