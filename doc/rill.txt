@@ -134,20 +134,33 @@ floating windows are never replaced. Files retain normal editing options;
 creating a source tab leaves no extra empty buffer. Selecting a file
 in the sidebar jumps to it in the stream, or switches the focused file.
 
-The Files panel adapts to the longest visible entry, capped at tree.max_width
-and tree.max_ratio of the screen. tree_width sets its initial width and the
-minimum used for content fitting, subject to those bounds. Drag the separator,
-use CTRL-W < / >, or press < / > in Files to resize. Manual width persists across
-reviews, panel toggles and layout changes for this Neovim session; automatic
-fitting then stops, but screen bounds still apply. 'winfixwidth' preserves its
-width when other windows open or equalize.
+The Files panel automatically fits visible entries, capped at tree.max_width
+and tree.max_ratio. tree_width sets its initial/content-fitting minimum.
+Drag the separator, use CTRL-W < / >, or press { / } (< / > aliases) to resize
+in tree.resize_step increments. Manual width can exceed the automatic caps;
+it has a 20-column minimum and leaves 40 columns for the review when space
+allows. The preference survives reviews, panel toggles and layout changes for
+this Neovim session. A smaller screen clamps the displayed width without
+forgetting that preference. 'winfixwidth' preserves width when windows equalize.
 
 Files has no number/sign columns. Folder folds, indent markers, optional file
 icons (MiniIcons or nvim-web-devicons) and colored Git status glyphs distinguish
 entries. Truncation uses ellipses and preserves filenames before indentation;
 commit headings retain the short SHA. Enter/o/l select files or expand folders;
 h collapses or moves to the parent; za folds a folder/commit or selected file
-body; q closes only the panel; g? shows its keys. Existing Rill/Sidekick keys still work; gT reopens it.
+body; q closes only the panel; g? shows its keys. gT reopens it.
+
+Inside Files, fold keys control the tree independently of diff expansion:
+
+    zA          Close all if any visible node is open; otherwise open all
+    zM / zR     Close / open all nodes
+    zo / zc     Open / close the node under the cursor
+    zO / zC     Open / close its entire subtree
+    za          Toggle the current node; a file row still toggles its diff body
+
+Collapsed commit/folder nodes retain the current-file highlight without being
+automatically reopened. Tree fold keys never expand source context; zB has no
+action here. Commit fold state follows its commit ID through refreshes.
 
 Source text is ordinary buffer text. Normal motions, character/line/block visual
 selection, / and ? search, and yanking work on materialized rows. Gutter source
@@ -388,9 +401,18 @@ text, including partial lines; it is a snapshot, not a live buffer reference.
 Unified deletions use old coordinates; additions and unchanged context use new
 coordinates. Split uses the selected pane's side. Renames use the corresponding
 old or new path. Mixed sides, files, gaps, and discontinuities produce separate
-spans. Tree/file headers can return a file with no spans; gaps and padding never
+spans. A diff file header can return a file with no spans; gaps and padding never
 supply invented source lines. Resolve before opening another window or refreshing
 the review, then retain the resulting snapshot for asynchronous work.
+
+Files selections return {root, label, entries, spans={}}. Entries are ordered
+file/directory/commit/uncommitted references with canonical paths and optional
+revision metadata. Normal mode selects one row. Visual modes select all touched
+rows in display order, including upward or partial-label selections. Exact
+duplicates and placeholders are omitted; a closed directory names only itself.
+file is set only for one file row, directory only for one directory row. A commit
+heading describes that commit, never its first file. Sidebar rows are not source
+line ranges, and collecting context never reads directory contents.
 
 ==============================================================================
 SIDEKICK                                                    *rill-sidekick*
@@ -410,6 +432,13 @@ available in the shadowfax-sidekick.nvim fork.
 These mappings work in normal and visual modes and remain local to Rill buffers.
 Set sidekick=false to omit them. Existing Sidekick routing and multicast settings
 still apply.
+
+In Files, these keys send selected file, directory and commit references. Line,
+This and comment sends include "Rill review: <comparison>"; af/aF send only the
+references. Directories have trailing slashes. Renamed/deleted files and per-commit
+revisions are labelled. Absolute variants prefix repository paths with its root.
+Tree icons, abbreviated labels and display row numbers never become source paths
+or :L references. Comment preview and later delivery share the captured selection.
 
 Line messages contain source paths, line ranges, side/revision labels, and fenced
 selected text. File messages contain paths only. A mixed selection produces

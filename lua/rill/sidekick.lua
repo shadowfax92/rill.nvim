@@ -1,4 +1,4 @@
---- Bridges source-addressed Rill selections to Sidekick's existing message flow.
+--- Bridges Rill source spans and tree references to Sidekick's message flow.
 --- Context is captured before opening a comment popup, so refreshes and window
 --- changes cannot alter the code or revision attached to an in-progress comment.
 local M = {}
@@ -29,13 +29,61 @@ local function fence(lines)
   return string.rep("`", longest + 1)
 end
 
----@param context table? Rill source context, never review-buffer coordinates.
+-- Sidebar rows are references, not code snippets: labels can be shortened and
+-- contain icons. The tree snapshots their complete identities before any popup
+-- changes focus or a refresh replaces the displayed comparison.
+local function format_entries(context, opts)
+  local result, seen = {}, {}
+  for _, entry in ipairs(context.entries) do
+    local text
+    if entry.kind == "commit" then
+      text = "commit "
+        .. (entry.revision or "unknown"):sub(1, 8)
+        .. " "
+        .. (entry.subject or ""):gsub("%c", " ")
+    elseif entry.kind == "uncommitted" then
+      text = "uncommitted changes (worktree vs HEAD)"
+    else
+      local path = path_for(context, entry, opts.absolute)
+      text = reference(path .. (entry.kind == "directory" and "/" or ""))
+      if entry.status == "D" then
+        text = text .. " (deleted)"
+      elseif entry.old_path then
+        text = text
+          .. " (renamed from "
+          .. reference(path_for(context, { path = entry.old_path }, opts.absolute)):sub(2)
+          .. ")"
+      end
+      if entry.revision then
+        text = text
+          .. (entry.revision == "worktree" and " (worktree)" or " (in " .. entry.revision:sub(1, 8) .. ")")
+      end
+    end
+    if not seen[text] then
+      seen[text] = true
+      result[#result + 1] = text
+    end
+  end
+  if #result == 0 then
+    return ""
+  end
+  local references = table.concat(result, "\n")
+  if opts.kind == "file" then
+    return references
+  end
+  return "Rill review: " .. (context.label or "Files"):gsub("%c", " ") .. "\n" .. references
+end
+
+---@param context table? Captured source spans or tree entries, never display coordinates.
 ---@param opts? {absolute?: boolean, kind?: 'line'|'file'}
 ---@return string
 function M.format(context, opts)
   opts = opts or {}
   if not context then
     return ""
+  end
+  if context.entries then
+    return format_entries(context, opts)
   end
 
   local result = {}
@@ -101,7 +149,11 @@ function M.send(opts)
   local context = require("rill").context(captured)
   local formatted = M.format(context, opts)
   if formatted == "" then
-    warn("select source code to send, or use Send File on a file header.")
+    if vim.api.nvim_buf_is_valid(captured.buf) and vim.bo[captured.buf].filetype == "rill_tree" then
+      warn("select a file, directory or commit in Files.")
+    else
+      warn("select source code to send, or use Send File on a file header.")
+    end
     return false
   end
 

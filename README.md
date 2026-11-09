@@ -75,6 +75,12 @@ base retain a `(guessed)` fallback.
 search. Enter updates the same review, Escape cancels, and `gr` follows the
 selected ref after a fetch. Use `:RillBase <tag-or-revision>` for other bases.
 
+In Files, `zA` toggles all tree folds; `zM` / `zR` close / open all, and
+`zo` / `zc` (`zO` / `zC` recursively) open / close a node. `{` / `}` narrow /
+widen the sidebar in five-column steps; manual width survives reopening.
+Sidekick send/comment keys work on selected files, folders and commits, using
+their full paths and the comparison label even when the sidebar is truncated.
+
 Options, the Lua API and Sidekick details are in `:help rill`; internals in
 [docs/architecture.md](docs/architecture.md).
 

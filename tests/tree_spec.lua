@@ -54,6 +54,169 @@ local function key(tree, lhs)
 end
 
 return {
+  toggle_all_reopens_individually_closed_commits_in_one_press = function()
+    with_tree(function(create)
+      local tree = create()
+      tree:update({
+        files = { file("src/a.lua", "M", 1), file("tests/b.lua", "M", 2) },
+        groups = {
+          { oid = "aaa", short = "aaa", subject = "First" },
+          { oid = "bbb", short = "bbb", subject = "Second" },
+        },
+      })
+      local expanded = lines(tree)
+      for group = 1, 2 do
+        for row, entry in ipairs(tree.entries) do
+          if entry.group == group then
+            api.nvim_win_set_cursor(tree.win, { row, 0 })
+            key(tree, "za")
+            break
+          end
+        end
+      end
+      H.eq(2, #tree.entries)
+      key(tree, "zA")
+      H.eq(expanded, lines(tree), "a visibly closed tree opens in one press, including its hidden folders")
+    end)
+  end,
+
+  all_folds_can_be_closed_and_reopened_from_the_sidebar = function()
+    with_tree(function(create)
+      local tree = create()
+      tree:update({
+        files = {
+          file("src/deep/a.lua", "M", 1),
+          file("src/deep/b.lua", "A", 1),
+          file("other/c.lua", "M", 2),
+        },
+        groups = { { short = "aaaa1111", subject = "First" }, { short = "bbbb2222", subject = "Second" } },
+      })
+      local expanded = lines(tree)
+      H.ok(#expanded > 2)
+      api.nvim_win_set_cursor(tree.win, { 3, 0 })
+      key(tree, "zA")
+      H.eq(2, #tree.entries)
+      H.eq("@aaaa1111", tree:selected().key, "collapse keeps the cursor on its visible ancestor")
+      key(tree, "zA")
+      H.eq(expanded, lines(tree), "toggle all restores the merged directory chains")
+      key(tree, "zM")
+      H.eq(2, #tree.entries, "collapse all must fold both commits and their hidden directories")
+      key(tree, "zR")
+      H.eq(expanded, lines(tree), "expand all must reopen the full hierarchy")
+    end)
+  end,
+
+  recursive_node_folds_do_not_touch_sibling_commits = function()
+    with_tree(function(create)
+      local tree = create()
+      tree:update({
+        files = {
+          file("src/deep/a.lua", "M", 1),
+          file("src/other/b.lua", "M", 1),
+          file("tests/c.lua", "M", 2),
+        },
+        groups = { { short = "aaaa1111", subject = "First" }, { short = "bbbb2222", subject = "Second" } },
+      })
+      local expanded = lines(tree)
+      api.nvim_win_set_cursor(tree.win, { 1, 0 })
+      key(tree, "zC")
+      H.eq(true, tree.folded["@aaaa1111/src"])
+      H.eq(nil, tree.folded["@bbbb2222"])
+      key(tree, "zo")
+      H.eq(nil, tree.folded["@aaaa1111"])
+      H.eq(true, tree.folded["@aaaa1111/src"], "opening one node preserves descendant folds")
+      key(tree, "zO")
+      H.eq(expanded, lines(tree))
+      key(tree, "zc")
+      H.eq(true, tree.folded["@aaaa1111"])
+    end)
+  end,
+
+  folded_commits_keep_their_identity_when_new_commits_are_inserted = function()
+    with_tree(function(create)
+      local tree = create()
+      local a, b = file("a.lua", "M", 1), file("b.lua", "M", 2)
+      local groups = {
+        { oid = "aaa", short = "aaa", subject = "First" },
+        { oid = "bbb", short = "bbb", subject = "Second" },
+      }
+      tree:update({ files = { a, b }, groups = groups })
+      api.nvim_win_set_cursor(tree.win, { 3, 0 })
+      key(tree, "za")
+      table.insert(groups, 1, { oid = "new", short = "new", subject = "Inserted" })
+      a.meta.group, b.meta.group = 2, 3
+      tree:update({ files = { file("new.lua", "A", 1), a, b }, groups = groups })
+      H.eq(true, tree.folded["@bbb"])
+      H.eq(nil, tree.folded["@aaa"])
+      H.eq("@bbb", tree:selected().key)
+      H.eq("▸ 3/3 bbb Second", lines(tree)[#tree.entries])
+    end)
+  end,
+
+  file_navigation_highlights_the_closed_parent_without_expanding_it = function()
+    with_tree(function(create)
+      require("rill.highlight").colors()
+      local tree = create()
+      local a, b = file("src/a.lua", "M", 1), file("src/b.lua", "M", 1)
+      tree:update({
+        files = { a, b },
+        groups = { { short = "aaaa1111", subject = "First" } },
+        current_file = b.meta.id,
+      })
+      key(tree, "zM")
+      tree:highlight(b.meta.id)
+      H.eq(1, #tree.entries)
+      local highlighted = false
+      for _, mark in
+        ipairs(
+          api.nvim_buf_get_extmarks(
+            tree.buf,
+            api.nvim_create_namespace("rill.tree"),
+            0,
+            -1,
+            { details = true }
+          )
+        )
+      do
+        highlighted = highlighted or (mark[2] == 0 and mark[4].line_hl_group == "RillTreeCurrent")
+      end
+      H.ok(highlighted, "the current file's closed parent remains identifiable")
+    end)
+  end,
+
+  a_smaller_screen_clamps_manual_width_without_forgetting_it = function()
+    with_tree(function(create)
+      local tree = create()
+      tree:update({ files = { file("a.lua") } })
+      api.nvim_win_set_width(tree.win, 80)
+      tree:render()
+      H.eq(80, api.nvim_win_get_width(tree.win), "native resizing ignores the automatic cap")
+      vim.o.columns = 100
+      tree:render()
+      H.eq(59, api.nvim_win_get_width(tree.win))
+      key(tree, "}") -- a no-op at this screen's maximum must preserve the wider preference
+      vim.o.columns = 160
+      tree:render()
+      H.eq(80, api.nvim_win_get_width(tree.win))
+    end)
+  end,
+
+  nvimtree_width_keys_can_grow_beyond_the_automatic_content_limit = function()
+    with_tree(function(create, anchor)
+      local tree = create({ options = { max_width = 48, max_ratio = 0.3 } })
+      tree:update({ files = { file("directory-with-a-long-name/another-long-name/file.lua") } })
+      H.eq(48, api.nvim_win_get_width(tree.win))
+      key(tree, "}")
+      H.eq(53, api.nvim_win_get_width(tree.win), "manual widening must not use the automatic content cap")
+      key(tree, "{")
+      H.eq(48, api.nvim_win_get_width(tree.win))
+      key(tree, "}")
+      tree:close()
+      tree:open(anchor)
+      H.eq(53, api.nvim_win_get_width(tree.win), "manual width survives closing and reopening")
+    end)
+  end,
+
   adaptive_width_is_bounded_and_keeps_filenames_and_commit_sha = function()
     with_tree(function(create)
       local tree = create({ options = { max_width = 48, max_ratio = 0.3 } })
@@ -192,7 +355,7 @@ return {
       })
       api.nvim_win_set_cursor(tree.win, { 1, 0 })
       key(tree, ">")
-      H.eq("@1", tree:selected().key, "resizing must leave the selected commit node selected")
+      H.eq("@abcdef12", tree:selected().key, "resizing must leave the selected commit node selected")
       key(tree, "za")
       H.eq(1, #tree.entries)
     end)

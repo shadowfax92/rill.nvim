@@ -398,6 +398,81 @@ local function without_files(snapshot, keep)
 end
 
 return {
+  ["upward and block tree selections preserve canonical paths and commit identities"] = function()
+    with_review(function(session)
+      local tree, adapter = session.tree, require("rill.sidekick")
+      local snapshot = session.snapshot
+      local folder
+      for row, entry in ipairs(tree.entries) do
+        if entry.directory and entry.group_index == 1 then
+          folder = row
+          break
+        end
+      end
+      H.ok(folder)
+      local context = view.context({
+        buf = tree.buf,
+        win = tree.win,
+        range = {
+          from = { folder + 1, 5 },
+          to = { 1, 6 },
+          kind = "block",
+        },
+      })
+      H.eq("commit", context.entries[1].kind)
+      H.eq(A, context.entries[1].revision)
+      H.eq("src", context.entries[2].path, "group-scoped fold keys must never leak into repository paths")
+      H.eq(nil, context.file, "a mixed sidebar selection does not identify one source file")
+      local formatted = adapter.format(context)
+      H.ok(formatted:find("commit aaaaaaaa Add a", 1, true), formatted)
+      H.ok(formatted:find("@src/ (in aaaaaaaa)", 1, true), formatted)
+      H.ok(formatted:find("@src/a.lua (in aaaaaaaa)", 1, true), formatted)
+      H.eq(nil, formatted:find(":L", 1, true))
+      H.eq(snapshot, session.snapshot)
+      api.nvim_set_current_win(tree.win)
+      local rows, collapsed = vim.deepcopy(session.rows), vim.deepcopy(session.collapsed)
+      press("zR")
+      press("zB")
+      H.eq(rows, session.rows, "tree fold shortcuts must not change the diff's context")
+      H.eq(collapsed, session.collapsed, "tree fold shortcuts must not change file-body folds")
+    end, { fixture = commits_fixture })
+  end,
+
+  ["sidebar folder and visual selections send full paths and the comparison"] = function()
+    with_review(function(session)
+      local tree = session.tree
+      local directory, file_row
+      for index, entry in ipairs(tree.entries) do
+        if entry.directory == "tests" then
+          directory = index
+        end
+        if entry.file and entry.file.meta.id == "second" then
+          file_row = index
+        end
+      end
+      H.ok(directory and file_row)
+      local context = view.context({ buf = tree.buf, win = tree.win, row = directory })
+      H.ok(context, "folder rows must provide sidebar context")
+      H.eq({}, context.spans, "sidebar rows are not source line ranges")
+      local adapter = require("rill.sidekick")
+      local formatted = adapter.format(context)
+      H.ok(formatted:find("@tests/", 1, true), formatted)
+      local selection = view.context({
+        buf = tree.buf,
+        win = tree.win,
+        range = {
+          from = { directory, 0 },
+          to = { file_row, vim.v.maxcol },
+          kind = "line",
+        },
+      })
+      formatted = adapter.format(selection)
+      H.ok(formatted:find("Rill review: " .. session.snapshot.label, 1, true), formatted)
+      H.ok(formatted:find("@tests/new.lua", 1, true), formatted)
+      H.eq(nil, formatted:find(":L", 1, true), "sidebar display rows must never become source lines")
+    end)
+  end,
+
   ["branch gm maps source lines across upstream insertions on both sides"] = function()
     for _, layout in ipairs({ "stream", "focus" }) do
       for _, side in ipairs({ "old", "new" }) do
@@ -659,7 +734,7 @@ return {
     end)
   end,
 
-  ["file tree selection supplies exact file context while directory rows supply none"] = function()
+  ["file tree selections supply exact file or directory identities without source lines"] = function()
     with_review(function(session)
       local tree_buf = api.nvim_win_get_buf(session.tree.win)
       local directory, file_row
@@ -671,7 +746,10 @@ return {
           file_row = index
         end
       end
-      H.eq(nil, view.context({ buf = tree_buf, row = directory }))
+      local folder = view.context({ buf = tree_buf, row = directory })
+      H.eq(nil, folder.file)
+      H.eq("directory", folder.entries[1].kind)
+      H.eq({}, folder.spans)
       local context = view.context({ buf = tree_buf, row = file_row })
       H.eq("tests/new.lua", context.file.path)
       H.eq({}, context.spans)
@@ -1680,7 +1758,17 @@ return {
         return buffer_lines(session.tree.win)
       end
       H.eq(
-        { "@1", "@1/src", "src/a.lua", "src/shared.lua", "@2", "empty", "@3", "@3/src", "src/shared.lua" },
+        {
+          "@" .. A,
+          "@" .. A .. "/src",
+          "src/a.lua",
+          "src/shared.lua",
+          "@" .. B,
+          "empty",
+          "@" .. C,
+          "@" .. C .. "/src",
+          "src/shared.lua",
+        },
         vim.tbl_map(function(entry)
           return entry.key or (entry.file and entry.file.meta.path) or "empty"
         end, session.tree.entries)
@@ -1699,7 +1787,10 @@ return {
       api.nvim_win_set_cursor(session.tree.win, { 1, 0 })
       press("za")
       H.eq({ "▸ 1/3 aaaaaaaa Add a", "▾ 2/3 bbbbbbbb Nothing" }, vim.list_slice(tree_lines(), 1, 2))
-      H.eq(A .. ":src/a.lua", view.context({ buf = api.nvim_win_get_buf(session.tree.win), row = 1 }).file.id)
+      local context = view.context({ buf = api.nvim_win_get_buf(session.tree.win), row = 1 })
+      H.eq(nil, context.file, "a commit heading is not its first file")
+      H.eq("commit", context.entries[1].kind)
+      H.eq(A, context.entries[1].revision)
       press("<CR>")
       H.eq(session.file_rows[A .. ":src/a.lua"], api.nvim_win_get_cursor(session.main_win)[1])
     end, { fixture = commits_fixture })
