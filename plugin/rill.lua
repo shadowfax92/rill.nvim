@@ -27,3 +27,7 @@ for name, action in pairs({
     require("rill")[action]()
   end, { desc = "Rill: " .. action })
 end
+
+vim.api.nvim_create_user_command("RillBase", function(opts)
+  require("rill").select_base(opts.args ~= "" and opts.args or nil)
+end, { nargs = "?", desc = "Choose the current branch review's comparison base" })

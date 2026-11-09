@@ -36,6 +36,7 @@ local function display_label(text)
 end
 
 local Group = require("rill.group")
+local Refs = require("rill.refs")
 local group_label = Group.label
 
 -- The commit a document row belongs to: commit rows and "(no changes)" rows
@@ -327,6 +328,9 @@ function Session:titles()
     -- the cursor instead of the first parent → last commit endpoints.
     local index = groups[self.current_group] and self.current_group or 1
     title = group_label(index, Group.commit_count(groups), groups[index], "title")
+    if self.snapshot.branch then
+      title = title .. " · vs " .. Refs.label(self.snapshot.branch.left)
+    end
     count = #self.files .. " files · " .. Group.commit_count(groups) .. " commits "
   else
     title = self.snapshot and self.snapshot.label or "Loading Git changes…"
@@ -349,6 +353,7 @@ function Session:titles()
         focused = self.focus_id ~= nil,
         commits = groups ~= nil,
         commits_view = self.snapshot and self.snapshot.commits_view,
+        branch = self.opts.mode == "branch",
       })
       api.nvim_set_option_value("winbar", bar, { win = win, scope = "local" })
       api.nvim_set_option_value(
@@ -573,10 +578,14 @@ function Session:render(anchor)
     end
   end
   if #self.rows == 0 then
+    local empty = self.snapshot and "No changes in this comparison." or "Loading Git changes…"
+    if self.snapshot and self.snapshot.branch then
+      empty = "No changes vs " .. Refs.label(self.snapshot.branch.left) .. " — gb picks another base"
+    end
     self.rows = {
       {
         kind = "meta",
-        text = self.error or (self.snapshot and "No changes in this comparison." or "Loading Git changes…"),
+        text = self.error or empty,
       },
     }
   end
@@ -618,6 +627,7 @@ function Session:render_tree()
     files = self.files,
     groups = self:groups(),
     current_file = self.current_file,
+    branch = self.opts.mode == "branch",
     message = self.error and "Git error" or self.snapshot and "No changes" or "Loading…",
   })
 end
@@ -878,6 +888,12 @@ function Session:load(opts)
     end
     if err then
       self.error = tostring(err)
+      if self.snapshot and self.snapshot.options and self.opts._base_source == "picked" then
+        -- A ref can disappear while its picker is open. Keep the retained
+        -- document's base authoritative so gr can recover without another pick.
+        self.opts.base = self.snapshot.options.base
+        self.opts._base_source = self.snapshot.options._base_source
+      end
       if not self.snapshot then
         self:render()
       end
@@ -979,7 +995,7 @@ function Session:load(opts)
     self:render(target)
     for buf, binding in pairs(M.buffers) do
       if binding.session == self and api.nvim_buf_is_valid(buf) then
-        self:commit_keys(buf)
+        self:comparison_keys(buf)
       end
     end
     -- The same path may have different source coordinates in each view: a
@@ -1050,6 +1066,87 @@ function Session:load(opts)
     end
     restore_next(1)
   end)
+end
+
+--- Change a branch comparison in place. Picker work belongs to this session,
+--- independently of diff generations: gr may refresh beneath an open picker,
+--- while a newer picker or close invalidates its eventual user decision.
+function Session:select_base(rev)
+  if self.closed then
+    return
+  end
+  if self.opts.mode ~= "branch" then
+    notify("Open a branch review to choose its base (:Rill branch)")
+    return
+  end
+  if rev ~= nil and (type(rev) ~= "string" or rev == "") then
+    error("Rill base must be a non-empty revision")
+  end
+  if self.base_cancel then
+    self.base_cancel()
+    self.base_cancel = nil
+  end
+  local picker = {}
+  self.base_picker = picker
+  local function active()
+    return not self.closed
+      and self.opts.mode == "branch"
+      and M.sessions[self.tab] == self
+      and self.base_picker == picker
+  end
+  local function choose(base)
+    if not base or not active() then
+      return
+    end
+    self.base_picker = nil
+    -- Store the name, not today's OID, so refresh follows a later fetch. load()
+    -- clears gm's cached endpoints and keeps layout, focus and path filters.
+    self:load({ base = base, _base_source = "picked" })
+  end
+  if rev then
+    choose(rev)
+    return
+  end
+  local completed = false
+  local cancel = require("rill.git").bases(
+    vim.tbl_extend("force", self.opts, {
+      cwd = self.snapshot and self.snapshot.root or self.opts.cwd,
+      left = self.snapshot and self.snapshot.left,
+      head = self.snapshot and self.snapshot.branch and self.snapshot.branch.right.head,
+    }),
+    function(err, items)
+      completed = true
+      if not active() then
+        return
+      end
+      self.base_cancel = nil
+      if err then
+        notify(tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      if #items == 0 then
+        notify("No other branches found; use :RillBase <revision>")
+        return
+      end
+      vim.ui.select(items, {
+        prompt = "Compare base:",
+        kind = "rill_base",
+        format_item = function(item)
+          local hints = #item.hints > 0 and "  (" .. table.concat(item.hints, " · ") .. ")" or ""
+          return item.label .. "  " .. (item.tip or ""):sub(1, 8) .. hints
+        end,
+      }, function(item)
+        if item then
+          choose(item.ref)
+        elseif active() then
+          self.base_picker = nil
+        end
+      end)
+    end
+  )
+  if not completed then
+    self.base_cancel = cancel
+  end
 end
 
 -- View switches reuse the session's load generation and cancellation boundary;
@@ -1458,6 +1555,7 @@ function Session:help()
     table.insert(lines, 6, "gm        combined / per commit (gaps stay per commit)")
   end
   if self.snapshot and self.snapshot.branch then
+    table.insert(lines, 6, "gb        choose comparison base")
     table.insert(lines, #lines - 2, "Branch: first-parent commits, then Uncommitted changes (when dirty).")
     table.insert(
       lines,
@@ -1495,9 +1593,16 @@ function Session:help()
   end
 end
 
--- Commit jumps exist only while groups are displayed. Rebind after a load so
--- gm does not leave per-commit navigation active over a combined comparison.
-function Session:commit_keys(buf)
+-- Comparison-specific keys follow the loaded mode. In particular gb remains
+-- available in an empty branch review, and gm cannot leave stale commit jumps.
+function Session:comparison_keys(buf)
+  if self.opts.mode == "branch" then
+    vim.keymap.set("n", "gb", function()
+      self:select_base()
+    end, { buffer = buf, silent = true, desc = "Rill: choose comparison base" })
+  else
+    pcall(vim.keymap.del, "n", "gb", { buffer = buf })
+  end
   for key, direction in pairs({ ["]C"] = 1, ["[C"] = -1 }) do
     if self:groups() then
       vim.keymap.set("n", key, function()
@@ -1644,7 +1749,7 @@ function Session:keys(buf)
   for key, action in pairs(actions) do
     vim.keymap.set("n", key, action[2], { buffer = buf, silent = true, desc = "Rill: " .. action[1] })
   end
-  self:commit_keys(buf)
+  self:comparison_keys(buf)
   if self.opts.sidekick ~= false then
     require("rill.sidekick").attach(buf)
   end
@@ -1655,6 +1760,11 @@ function Session:close()
     return
   end
   self.closed = true
+  if self.base_cancel then
+    self.base_cancel()
+    self.base_cancel = nil
+  end
+  self.base_picker = nil
   self.generation = self.generation + 1
   for _, cancel in pairs(self.jobs) do
     pcall(cancel)

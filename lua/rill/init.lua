@@ -131,6 +131,21 @@ function M.refresh()
   end
 end
 
+--- Choose a base for the current branch review, or apply a revision directly.
+--- The session captures picker ownership before any asynchronous UI opens.
+function M.select_base(rev)
+  local session = M.current()
+  if session then
+    session:select_base(rev)
+  else
+    vim.notify(
+      "Open a branch review to choose its base (:Rill branch)",
+      vim.log.levels.INFO,
+      { title = "Rill" }
+    )
+  end
+end
+
 function M.command(args)
   local options, positional, paths = {}, {}, nil
   for _, value in ipairs(args) do

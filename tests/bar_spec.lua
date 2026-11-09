@@ -14,6 +14,17 @@ local function rendered(width, layout, side, commits)
 end
 
 return {
+  ["branch base action remains discoverable in narrow reviews"] = function()
+    for _, width in ipairs({ 45, 90, 180 }) do
+      local value =
+        Bar.render({ width = width, title = "Branch feature vs origin/main (default)", branch = true })
+      local shown = vim.api.nvim_eval_statusline(value, { use_winbar = true, maxwidth = width }).str
+      H.ok(shown:find("gb base", 1, true), shown)
+      H.ok(shown:find("g? help", 1, true), shown)
+    end
+    H.eq(nil, rendered(150):find("gb base", 1, true), "non-branch reviews do not advertise base selection")
+  end,
+
   ["narrow titles retain their meaning with an ellipsis"] = function()
     local value = Bar.render({
       width = 90,

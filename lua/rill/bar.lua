@@ -21,6 +21,9 @@ function M.render(opts)
     actions = { { "zo", "context" }, { "zR", "full file" }, { "Enter", "source" }, { "g?", "help" } }
   else
     actions = {}
+    if opts.branch then
+      actions[#actions + 1] = { "gb", "base" }
+    end
     if opts.commits_view then
       actions[#actions + 1] = { "gm", opts.commits_view == "combined" and "per commit" or "combined" }
     end
