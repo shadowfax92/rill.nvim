@@ -19,6 +19,7 @@ file, even after later edits.
 - **Any comparison**: working tree, staged, branch, one commit, a range, or several commits
 - **Unified or split**, with expandable context and Tree-sitter syntax
 - **Branch review by commit**: `gm` steps through each commit, merges included
+- **Choose the base**: `gb` searches local and remote branches without leaving the review
 - **Sidekick-aware**: selections send exact source paths and lines to your agent
 
 Requires Neovim 0.11+ and Git. No Lua dependencies.
@@ -31,7 +32,7 @@ lazy.nvim:
 {
   "shadowfax92/rill.nvim",
   main = "rill",
-  cmd = { "Rill", "RillClose", "RillToggle", "RillFocus", "RillRefresh" },
+  cmd = { "Rill", "RillClose", "RillToggle", "RillFocus", "RillRefresh", "RillBase" },
   opts = {},
   keys = {
     { "<leader>gd", "<cmd>Rill<cr>", desc = "Review working changes" },
@@ -47,6 +48,7 @@ lazy.nvim:
 | `:Rill` | HEAD → working tree, untracked files included |
 | `:Rill staged` | HEAD → index |
 | `:Rill branch [base]` | branch point → working tree |
+| `:RillBase [rev]` | choose or set the current branch review's base |
 | `:Rill commit [rev]` | parent → commit |
 | `:Rill A..B` / `:Rill A...B` | A → B / merge base → B |
 | `:Rill commits A B C` | several commits, combined when contiguous |
@@ -58,9 +60,20 @@ lazy.nvim:
 | `gs` | unified ↔ split |
 | `gf` | focus the file |
 | `gm` | combined ↔ per commit |
+| `gb` | choose the branch comparison base |
 | `Enter` | open the source line, or expand hidden context |
 | `g?` | every key |
 | `q` | close |
+
+Branch reviews honor `branch.<name>.gh-merge-base` for stacked work, otherwise
+use the remote default branch (usually `origin/main`). Trunk itself keeps its
+upstream comparison. The title explains the choice: `(default)`, `(gh-merge-base)`,
+`(upstream)`, `(explicit)` or `(picked)`; repositories without a declared/default
+base retain a `(guessed)` fallback.
+
+`gb` uses `vim.ui.select`, so your configured picker (such as fzf-lua) supplies
+search. Enter updates the same review, Escape cancels, and `gr` follows the
+selected ref after a fetch. Use `:RillBase <tag-or-revision>` for other bases.
 
 Options, the Lua API and Sidekick details are in `:help rill`; internals in
 [docs/architecture.md](docs/architecture.md).

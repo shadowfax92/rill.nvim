@@ -110,18 +110,21 @@ return {
       local trunk = H.commit(root)
       H.command({ "git", "update-ref", "refs/remotes/origin/main", trunk }, root)
       H.command({ "git", "checkout", "-q", "feature" }, root)
-      local function check(label)
+      local function check(label, source)
         local snapshot = load(root, { mode = "branch" })
         H.eq(base, snapshot.left.rev, "label preference must not move the base")
         H.eq(label, snapshot.left.label)
-        H.eq("Branch feature vs " .. label .. " · commits + uncommitted", snapshot.label)
+        H.eq(
+          "Branch feature vs " .. label .. " (" .. (source or "guessed") .. ") · commits + uncommitted",
+          snapshot.label
+        )
         H.eq({ "own" }, paths(snapshot.files))
       end
-      check("main")
+      check("origin/main", "default")
       H.command({ "git", "branch", "zzz-parent", base }, root)
-      check("main") -- Trunk also outranks a ref pointing exactly at the base.
+      check("origin/main", "default") -- The remote default also outranks an exact-tip parent.
       H.command({ "git", "branch", "-D", "main" }, root)
-      check("origin/main") -- Remote trunk beats both local non-trunk candidates.
+      check("origin/main", "default") -- The remote default remains after local trunk is deleted.
       H.command({ "git", "update-ref", "-d", "refs/remotes/origin/main" }, root)
       H.command({ "git", "update-ref", "refs/remotes/origin/zzz-parent", base }, root)
       check("zzz-parent")
@@ -145,6 +148,7 @@ return {
       H.write(root, "beta", { "beta" })
       H.commit(root)
       H.command({ "git", "checkout", "-qb", "feature", "alpha" }, root)
+      H.command({ "git", "branch", "-D", "main" }, root) -- No declared/default target: exercise the labelled guess.
       H.command({ "git", "merge", "--no-ff", "-qm", "merge beta", "beta" }, root)
       H.write(root, "own", { "own" })
       H.commit(root)
@@ -229,6 +233,7 @@ return {
       H.command({ "git", "checkout", "-qb", "child" }, root)
       H.write(root, "child", { "child" })
       H.commit(root)
+      H.command({ "git", "config", "branch.child.gh-merge-base", "parent" }, root)
       local refs = {}
       for i = 1, 400 do
         refs[#refs + 1] = ("update refs/remotes/origin/old-%d %s"):format(i, base)
@@ -661,7 +666,7 @@ return {
       H.commit(root)
       local before = load(root, { mode = "branch" })
       H.eq(base, before.left.rev)
-      H.eq("Branch feat/x vs main · commits + uncommitted", before.label)
+      H.eq("Branch feat/x vs origin/main (default) · commits + uncommitted", before.label)
       H.eq({ "pushed1.txt", "pushed2.txt" }, paths(before.files))
 
       H.command({ "git", "push", "-qu", "origin", "feat/x" }, root)
@@ -701,7 +706,7 @@ return {
         H.write(root, "base", { "dirty" })
         local snapshot = load(root, { mode = "branch" })
         H.eq(base, snapshot.left.rev)
-        H.eq("main", snapshot.left.label)
+        H.eq("origin/main", snapshot.left.label)
         H.eq({ "base", "pushed", "unpushed" }, paths(snapshot.files))
       end)
     end
@@ -717,6 +722,7 @@ return {
       local parent = H.commit(root)
       H.command({ "git", "push", "-qu", "origin", "feat/parent" }, root)
       H.command({ "git", "checkout", "-qb", "feat/child" }, root)
+      H.command({ "git", "config", "branch.feat/child.gh-merge-base", "feat/parent" }, root)
       H.write(root, "child", { "child" })
       H.commit(root)
       local before = load(root, { mode = "branch" })
@@ -725,7 +731,7 @@ return {
       local pushed = load(root, { mode = "branch" })
       H.eq(parent, pushed.left.rev)
       H.eq(before.left, pushed.left)
-      H.eq("Branch feat/child vs feat/parent · commits + uncommitted", pushed.label)
+      H.eq("Branch feat/child vs origin/feat/parent (gh-merge-base) · commits + uncommitted", pushed.label)
       H.eq({ "child", "dirty" }, paths(pushed.files))
 
       H.command({ "git", "branch", "-D", "feat/parent" }, root)
@@ -755,8 +761,8 @@ return {
       H.commit(root)
       H.command({ "git", "push", "-qu", "origin", "main" }, root)
       local feature = load(root, { mode = "branch" })
-      H.eq("trunk", feature.left.label, "origin/HEAD makes main a feature branch here")
-      H.eq({ "dirty", "feature" }, paths(feature.files))
+      H.eq("origin/trunk", feature.left.label, "origin/HEAD makes main a feature branch here")
+      H.eq({ "dirty", "feature", "unpushed" }, paths(feature.files))
     end)
   end,
 
@@ -773,23 +779,24 @@ return {
       H.write(root, "dirty", { "dirty" })
       local main = load(root, { mode = "branch" })
       H.eq(base, main.left.rev)
-      H.eq("Branch main vs origin/main · commits + uncommitted", main.label)
+      H.eq("Branch main vs origin/main (upstream) · commits + uncommitted", main.label)
       H.eq(2, #main.files)
       H.command({ "git", "checkout", "-qb", "parent" }, root)
       H.write(root, "parent", { "parent" })
       parent = H.commit(root)
       H.command({ "git", "checkout", "-qb", "child" }, root)
+      H.command({ "git", "config", "branch.child.gh-merge-base", "parent" }, root)
       H.write(root, "child", { "child" })
       H.commit(root)
       local child = load(root, { mode = "branch" })
       H.eq(parent, child.left.rev)
-      H.eq("Branch child vs parent · commits + uncommitted", child.label)
+      H.eq("Branch child vs parent (gh-merge-base) · commits + uncommitted", child.label)
       H.eq(1, #child.files)
       H.eq("child", child.files[1].path)
     end)
   end,
 
-  fresh_branch_does_not_include_its_parents_unpushed_commits = function()
+  explicit_parent_does_not_include_its_unpushed_commits = function()
     fixture(function(root)
       H.write(root, "base", { "base" })
       local base = H.commit(root)
@@ -798,7 +805,10 @@ return {
       local parent = H.commit(root)
       H.command({ "git", "checkout", "-qb", "fresh-child" }, root)
       H.write(root, "dirty", { "dirty" })
-      local snapshot = load(root, { mode = "branch" })
+      local function review()
+        return load(root, { mode = "branch", base = "main" })
+      end
+      local snapshot = review()
       H.eq(parent, snapshot.left.rev)
       H.eq("main", snapshot.left.label)
       H.eq(1, #snapshot.files)
@@ -808,12 +818,12 @@ return {
       H.write(root, "downstream", { "downstream" })
       H.commit(root)
       H.command({ "git", "checkout", "-q", "fresh-child" }, root)
-      H.eq(parent, load(root, { mode = "branch" }).left.rev, "downstream is not a parent")
+      H.eq(parent, review().left.rev, "downstream is not a parent")
       H.command({ "git", "checkout", "-q", "--detach", child }, root)
-      H.eq(parent, load(root, { mode = "branch" }).left.rev, "detached alias is not a parent")
+      H.eq(parent, review().left.rev, "detached alias is not a parent")
       H.command({ "git", "checkout", "-q", "fresh-child" }, root)
       H.command({ "git", "branch", "-f", "main", child }, root)
-      H.eq(child, load(root, { mode = "branch" }).left.rev, "main already contains this branch")
+      H.eq(child, review().left.rev, "main already contains this branch")
     end)
   end,
 

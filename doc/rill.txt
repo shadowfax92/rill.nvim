@@ -36,14 +36,18 @@ COMMANDS                                                   *rill-commands*
     :Rill commits <rev>...         Combined selection; gm toggles per commit
                                    (|rill-commits|)
 
-    Branch mode includes pushed feature commits, using the closest branch point
-    among other local/remote branches (including stacked parents and reflog fork
-    points). It excludes the current branch, its published remote tracking ref
-    and same-named remote copies.
-    Only trunk itself (origin/HEAD's branch, otherwise main or master) uses its
-    configured upstream to show unpushed commits. Both include staged, unstaged
-    and untracked work. An explicit base overrides detection. Save edits before
-    reviewing disk changes. Root commits
+    Branch mode includes pushed feature commits. Base priority is an explicit
+    or picked revision, branch.<current>.gh-merge-base (origin's ref preferred,
+    otherwise local), trunk's upstream, then origin/HEAD, origin/main,
+    origin/master, local main or local master. Only trunk itself uses its
+    configured upstream to show unpushed commits. The gh setting is read only;
+    it provides an intentional parent for stacked work without guessing from
+    merged child branches. When none of these signals exists, the closest
+    branch/fork-point heuristic remains a fallback.
+
+    Titles label the base's source: (explicit), (picked), (gh-merge-base),
+    (upstream), (default) or (guessed). Branch reviews include staged, unstaged
+    and untracked work. Save edits before reviewing disk changes. Root commits
     and unborn HEAD use an empty tree where an ordinary parent is unavailable.
     A merge commit is compared with its first parent; no combined merge UI is
     provided. Revision modes exclude uncommitted changes.
@@ -72,6 +76,23 @@ COMMANDS                                                   *rill-commands*
 :RillRefresh                                                 *:RillRefresh*
     Reload the comparison from Git. Worktree updates are not watched.
 
+:RillBase [rev]                                              *:RillBase*
+    Choose the current branch review's base, or set it directly to a branch,
+    tag, SHA or revision expression. The review updates in the same tab,
+    preserving layout, focus, commit presentation and path filters.
+
+    Without an argument this uses vim.ui.select; a configured picker such as
+    fzf-lua supplies fuzzy search. The base in use, gh-merge-base, the default
+    and the branch's upstream appear first; remaining refs sort by most recent
+    commit. Rows include a short SHA and flag refs at HEAD as "no commits".
+    The checked-out local branch and symbolic HEAD aliases are omitted.
+
+    Enter applies the choice; Escape leaves the comparison intact. A pick lasts
+    for this review session only. gr re-resolves its ref after a fetch; gm keeps
+    the already resolved endpoints. An open picker survives gr and applies only
+    to the review it belongs to, even if another tab becomes current.
+    Selecting a base never checks out/fetches branches or writes Git config.
+
 ==============================================================================
 REVIEW KEYS                                                 *rill-keys*
 
@@ -82,6 +103,7 @@ All mappings below are local to Rill buffers.
     gs          Toggle unified / split
     gf          Focus file / return to stream
     gm          Combined / per commit for a branch or commit selection
+    gb          Choose comparison base (branch reviews, including empty ones)
     <CR>        Open source, expand gap, or select tree entry
     ]f / [f     Next / previous file
     ]c / [c     Next / previous hunk
@@ -307,6 +329,7 @@ rill.open_commits({commits}, {opts})                      *rill.open_commits()*
     rill.toggle()    Toggle layout in current review
     rill.focus()     Toggle focused file in current review
     rill.refresh()   Reload current comparison
+    rill.select_base(rev?)  Set the branch base, or open its picker
     rill.close()     Close current review
 
 The session object's internal fields are not an integration API. Use context()

@@ -3,6 +3,7 @@
 --- coordinates. Each request owns its jobs/read handles and suppresses late replies.
 local M = {}
 local uv = vim.uv
+local Refs = require("rill.refs")
 
 local DEFAULTS = {
   mode = "working",
@@ -434,299 +435,305 @@ local function commit_endpoints(owner, root, oid, parents, label, options, done)
   end
 end
 
--- Trunk compares with its upstream. Feature bases are the maximal shared
--- ancestors of HEAD and eligible refs, including stacked parents. Ref count
--- changes the input to bulk graph walks, never the number of child processes.
+-- An intentional PR target wins over trunk's upstream and the remote default.
+-- Only repositories without those signals use graph proximity as a labelled
+-- guess: a merged child can be just as close as a genuine stacked parent.
 local function branch_base(owner, root, head, options, done)
-  owner:run(root, { "symbolic-ref", "--quiet", "--short", "HEAD" }, options, function(name_err, name)
-    name = not name_err and vim.trim(name) or "HEAD"
-    local function deliver(oid, label)
+  Refs.read(owner, root, head, options, function(context_err, context)
+    if context_err then
+      done(context_err)
+      return
+    end
+    local name = context.name
+    local function deliver(oid, label, source, ref)
       local right = endpoint("worktree")
       right.branch = name
       right.head = head
-      done(nil, endpoint("commit", oid, label), right)
+      local left = endpoint("commit", oid, label)
+      left.base_source = source or "guessed"
+      left.ref = ref or label
+      done(nil, left, right)
     end
-    owner:run(
-      root,
-      {
-        "for-each-ref",
-        "--format=%(refname) %(objectname) %(symref) %(upstream)",
-        "refs/heads",
-        "refs/remotes",
-      },
-      options,
-      function(ref_err, output)
-        if ref_err then
-          done(ref_err)
-          return
-        end
-        local refs, names, by_ref = {}, {}, {}
-        local trunk, tracking
-        for record in output:gmatch("[^\n]+") do
-          local ref, tip, symref, upstream = record:match("^(%S+) (%S+) (%S*) (%S*)$")
-          local branch = ref:match("^refs/heads/(.+)$") or ref:match("^refs/remotes/[^/]+/(.+)$")
-          local entry = {
-            ref = ref,
-            tip = tip,
-            branch = branch,
-            label = ref:gsub("^refs/heads/", ""):gsub("^refs/remotes/", ""),
-          }
-          refs[#refs + 1], by_ref[ref] = entry, entry
-          if branch then
-            names[branch] = true
+    local refs, by_ref = vim.list_extend({}, context.refs), context.by_ref
+    local trunk, tracking = context.trunk, context.tracking
+    -- Picker order is recency; the fallback graph's final tie-break remains
+    -- deterministic ref order, independent of commit timestamps.
+    table.sort(refs, function(a, b)
+      return a.ref < b.ref
+    end)
+    local function find_base()
+      owner:run(
+        root,
+        { "for-each-ref", "--format=%(refname)", "--contains=" .. head, "refs/heads", "refs/remotes" },
+        options,
+        function(contains_err, contains_output)
+          if contains_err then
+            done(contains_err)
+            return
           end
-          if ref == "refs/heads/" .. name and upstream ~= "" then
-            tracking = upstream
+          local contains, candidates, tips, eligible = {}, {}, {}, {}
+          for ref in contains_output:gmatch("[^\n]+") do
+            contains[ref] = true
           end
-          if ref == "refs/remotes/origin/HEAD" and symref ~= "" then
-            trunk = symref:match("^refs/remotes/origin/(.+)$")
+          local shared_head = false
+          for _, entry in ipairs(refs) do
+            local published = entry.ref == tracking
+              and entry.ref:match("^refs/remotes/")
+              and entry.branch ~= trunk
+            -- An equal-tip parent is useful for a fresh branch, but not for a
+            -- detached alias. Descendants never parent a feature; trunk may
+            -- contain it after merging and correctly produces an empty diff.
+            local downstream = contains[entry.ref]
+              and entry.branch ~= trunk
+              and (name == "HEAD" or entry.tip ~= head)
+            if
+              entry.branch ~= name
+              and not published
+              and not entry.ref:match("/HEAD$")
+              and not downstream
+            then
+              candidates[#candidates + 1], tips[#tips + 1] = entry, entry.tip
+              eligible[entry.ref] = true
+              shared_head = shared_head or contains[entry.ref] or false
+            end
           end
-        end
-        trunk = trunk or (names.main and "main") or (names.master and "master")
-        local function find_base()
-          owner:run(
-            root,
-            { "for-each-ref", "--format=%(refname)", "--contains=" .. head, "refs/heads", "refs/remotes" },
-            options,
-            function(contains_err, contains_output)
-              if contains_err then
-                done(contains_err)
-                return
-              end
-              local contains, candidates, tips, eligible = {}, {}, {}, {}
-              for ref in contains_output:gmatch("[^\n]+") do
-                contains[ref] = true
-              end
-              local shared_head = false
-              for _, entry in ipairs(refs) do
-                local published = entry.ref == tracking
-                  and entry.ref:match("^refs/remotes/")
-                  and entry.branch ~= trunk
-                -- An equal-tip parent is useful for a fresh branch, but not for a
-                -- detached alias. Descendants never parent a feature; trunk may
-                -- contain it after merging and correctly produces an empty diff.
-                local downstream = contains[entry.ref]
-                  and entry.branch ~= trunk
-                  and (name == "HEAD" or entry.tip ~= head)
-                if
-                  entry.branch ~= name
-                  and not published
-                  and not entry.ref:match("/HEAD$")
-                  and not downstream
-                then
-                  candidates[#candidates + 1], tips[#tips + 1] = entry, entry.tip
-                  eligible[entry.ref] = true
-                  shared_head = shared_head or contains[entry.ref] or false
-                end
-              end
-              local frontier, fork_labels = {}, {}
-              local function choose()
-                if #frontier == 0 then
-                  deliver(head, name)
+          local frontier, fork_labels = {}, {}
+          local function choose()
+            if #frontier == 0 then
+              deliver(head, name)
+              return
+            end
+            owner:run(
+              root,
+              vim.list_extend({ "merge-base", "--independent" }, frontier),
+              options,
+              function(independent_err, independent)
+                if independent_err then
+                  done(independent_err)
                   return
                 end
-                owner:run(
-                  root,
-                  vim.list_extend({ "merge-base", "--independent" }, frontier),
-                  options,
-                  function(independent_err, independent)
-                    if independent_err then
-                      done(independent_err)
-                      return
-                    end
-                    local function label_base(base)
-                      owner:run(
-                        root,
-                        {
-                          "for-each-ref",
-                          "--format=%(refname)",
-                          "--contains=" .. base,
-                          "refs/heads",
-                          "refs/remotes",
-                        },
-                        options,
-                        function(label_err, labels)
-                          if label_err then
-                            done(label_err)
-                            return
-                          end
-                          local containing = {}
-                          for ref in labels:gmatch("[^\n]+") do
-                            containing[ref] = true
-                          end
-                          local best, rank
-                          for _, entry in ipairs(candidates) do
-                            if containing[entry.ref] or fork_labels[entry.ref] == base then
-                              -- The base is already fixed: prefer trunk, then an
-                              -- exact-tip parent, then other containing refs. Each
-                              -- tier prefers local over remote, with ref order as
-                              -- the final tie-break. A closer base is unaffected.
-                              local priority = entry.branch == trunk and 0 or entry.tip == base and 2 or 4
-                              if entry.ref:match("^refs/remotes/") then
-                                priority = priority + 1
-                              end
-                              if not rank or priority < rank then
-                                best, rank = entry, priority
-                              end
-                            end
-                          end
-                          if best then
-                            deliver(base, best.label)
-                          else
-                            done("No base branch found; provide a base revision")
-                          end
-                        end
-                      )
-                    end
-                    local bases, maximal = {}, {}
-                    for oid in independent:gmatch("[^\n]+") do
-                      bases[#bases + 1], maximal[oid] = oid, true
-                    end
-                    if #bases == 1 then
-                      label_base(bases[1])
-                      return
-                    end
-                    -- Incomparable shared bases arise when a feature merges two
-                    -- siblings. Git's boundary order is not ref precedence:
-                    -- retain all maxima until the first eligible ref chooses.
-                    -- Repeated --contains filters are ORed in one Git process.
-                    local args = { "for-each-ref", "--format=%(refname)" }
-                    for _, oid in ipairs(bases) do
-                      args[#args + 1] = "--contains=" .. oid
-                    end
-                    vim.list_extend(args, { "refs/heads", "refs/remotes" })
-                    owner:run(root, args, options, function(err, out)
-                      if err then
-                        done(err)
+                local function label_base(base)
+                  owner:run(
+                    root,
+                    {
+                      "for-each-ref",
+                      "--format=%(refname)",
+                      "--contains=" .. base,
+                      "refs/heads",
+                      "refs/remotes",
+                    },
+                    options,
+                    function(label_err, labels)
+                      if label_err then
+                        done(label_err)
                         return
                       end
                       local containing = {}
-                      for ref in out:gmatch("[^\n]+") do
+                      for ref in labels:gmatch("[^\n]+") do
                         containing[ref] = true
                       end
+                      local best, rank
                       for _, entry in ipairs(candidates) do
-                        if containing[entry.ref] then
-                          owner:run(
-                            root,
-                            { "merge-base", "--all", entry.tip, head },
-                            options,
-                            function(mb_err, mbs)
-                              if mb_err then
-                                done(mb_err)
-                                return
-                              end
-                              for oid in mbs:gmatch("[^\n]+") do
-                                if maximal[oid] then
-                                  label_base(oid)
-                                  return
-                                end
-                              end
-                              done("Base refs changed during review; refresh the comparison")
-                            end
-                          )
-                          return
-                        elseif maximal[fork_labels[entry.ref]] then
-                          label_base(fork_labels[entry.ref])
-                          return
+                        if containing[entry.ref] or fork_labels[entry.ref] == base then
+                          -- The base is already fixed: prefer trunk, then an
+                          -- exact-tip parent, then other containing refs. Each
+                          -- tier prefers local over remote, with ref order as
+                          -- the final tie-break. A closer base is unaffected.
+                          local priority = entry.branch == trunk and 0 or entry.tip == base and 2 or 4
+                          if entry.ref:match("^refs/remotes/") then
+                            priority = priority + 1
+                          end
+                          if not rank or priority < rank then
+                            best, rank = entry, priority
+                          end
                         end
                       end
-                      done("Base refs changed during review; refresh the comparison")
-                    end)
-                  end
-                )
-              end
-              -- Reflogs can retain a fork after trunk was rewritten. Only trunk's
-              -- local/origin refs and the configured upstream get this extra work:
-              -- checking every remote ref would reintroduce the many-ref stall.
-              local reflogs, seen = {}, {}
-              for _, ref in ipairs({
-                "refs/heads/" .. (trunk or ""),
-                "refs/remotes/origin/" .. (trunk or ""),
-                tracking or "",
-              }) do
-                if eligible[ref] and not seen[ref] then
-                  reflogs[#reflogs + 1], seen[ref] = ref, true
-                end
-              end
-              local function fork_point(index)
-                local ref = reflogs[index]
-                if not ref then
-                  choose()
-                  return
-                end
-                owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(err, out)
-                  local oid = not err and vim.trim(out) or nil
-                  if
-                    not oid
-                    or (
-                      oid == head
-                      and by_ref[ref].branch ~= trunk
-                      and (name == "HEAD" or by_ref[ref].tip ~= head)
-                    )
-                  then
-                    fork_point(index + 1)
-                    return
-                  end
-                  owner:run(
-                    root,
-                    { "merge-base", "--is-ancestor", oid, head },
-                    options,
-                    function(ancestor_err)
-                      if not ancestor_err then
-                        frontier[#frontier + 1], fork_labels[ref] = oid, oid
+                      if best then
+                        deliver(base, best.label)
+                      else
+                        done("No base branch found; provide a base revision")
                       end
-                      fork_point(index + 1)
                     end
                   )
-                end)
-              end
-              if shared_head then
-                frontier[1] = head
-                fork_point(1)
-              elseif #tips == 0 then
-                choose()
-              else
-                -- Boundary commits are where HEAD's history meets the union of
-                -- candidates. Removing ancestors of other boundary commits leaves
-                -- exactly the closest shared history, even after merging trunk.
-                -- --not on argv does not affect revisions read through stdin.
-                local excluded = vim.tbl_map(function(tip)
-                  return "^" .. tip
-                end, tips)
-                owner:run(
-                  root,
-                  { "rev-list", "--boundary", head, "--stdin" },
-                  { stdin = table.concat(excluded, "\n") .. "\n", timeout = options.timeout },
-                  function(err, out)
-                    if err then
-                      done(err)
+                end
+                local bases, maximal = {}, {}
+                for oid in independent:gmatch("[^\n]+") do
+                  bases[#bases + 1], maximal[oid] = oid, true
+                end
+                if #bases == 1 then
+                  label_base(bases[1])
+                  return
+                end
+                -- Incomparable shared bases arise when a feature merges two
+                -- siblings. Git's boundary order is not ref precedence:
+                -- retain all maxima until the first eligible ref chooses.
+                -- Repeated --contains filters are ORed in one Git process.
+                local args = { "for-each-ref", "--format=%(refname)" }
+                for _, oid in ipairs(bases) do
+                  args[#args + 1] = "--contains=" .. oid
+                end
+                vim.list_extend(args, { "refs/heads", "refs/remotes" })
+                owner:run(root, args, options, function(err, out)
+                  if err then
+                    done(err)
+                    return
+                  end
+                  local containing = {}
+                  for ref in out:gmatch("[^\n]+") do
+                    containing[ref] = true
+                  end
+                  for _, entry in ipairs(candidates) do
+                    if containing[entry.ref] then
+                      owner:run(
+                        root,
+                        { "merge-base", "--all", entry.tip, head },
+                        options,
+                        function(mb_err, mbs)
+                          if mb_err then
+                            done(mb_err)
+                            return
+                          end
+                          for oid in mbs:gmatch("[^\n]+") do
+                            if maximal[oid] then
+                              label_base(oid)
+                              return
+                            end
+                          end
+                          done("Base refs changed during review; refresh the comparison")
+                        end
+                      )
+                      return
+                    elseif maximal[fork_labels[entry.ref]] then
+                      label_base(fork_labels[entry.ref])
                       return
                     end
-                    for oid in out:gmatch("%-([0-9a-f]+)") do
-                      frontier[#frontier + 1] = oid
-                    end
-                    fork_point(1)
                   end
-                )
+                  done("Base refs changed during review; refresh the comparison")
+                end)
               end
+            )
+          end
+          -- Reflogs can retain a fork after trunk was rewritten. Only trunk's
+          -- local/origin refs and the configured upstream get this extra work:
+          -- checking every remote ref would reintroduce the many-ref stall.
+          local reflogs, seen = {}, {}
+          for _, ref in ipairs({
+            "refs/heads/" .. (trunk or ""),
+            "refs/remotes/origin/" .. (trunk or ""),
+            tracking or "",
+          }) do
+            if eligible[ref] and not seen[ref] then
+              reflogs[#reflogs + 1], seen[ref] = ref, true
             end
-          )
-        end
-        if name == trunk then
-          resolve(owner, root, "@{upstream}", options, function(err, upstream)
-            if err then
-              find_base()
+          end
+          local function fork_point(index)
+            local ref = reflogs[index]
+            if not ref then
+              choose()
               return
             end
-            owner:run(root, { "rev-parse", "--abbrev-ref", "@{upstream}" }, options, function(_, label)
-              deliver(upstream, label and vim.trim(label) or "upstream")
+            owner:run(root, { "merge-base", "--fork-point", ref, head }, options, function(err, out)
+              local oid = not err and vim.trim(out) or nil
+              if
+                not oid
+                or (
+                  oid == head
+                  and by_ref[ref].branch ~= trunk
+                  and (name == "HEAD" or by_ref[ref].tip ~= head)
+                )
+              then
+                fork_point(index + 1)
+                return
+              end
+              owner:run(root, { "merge-base", "--is-ancestor", oid, head }, options, function(ancestor_err)
+                if not ancestor_err then
+                  frontier[#frontier + 1], fork_labels[ref] = oid, oid
+                end
+                fork_point(index + 1)
+              end)
             end)
-          end)
-        else
-          find_base()
+          end
+          if shared_head then
+            frontier[1] = head
+            fork_point(1)
+          elseif #tips == 0 then
+            choose()
+          else
+            -- Boundary commits are where HEAD's history meets the union of
+            -- candidates. Removing ancestors of other boundary commits leaves
+            -- exactly the closest shared history, even after merging trunk.
+            -- --not on argv does not affect revisions read through stdin.
+            local excluded = vim.tbl_map(function(tip)
+              return "^" .. tip
+            end, tips)
+            owner:run(
+              root,
+              { "rev-list", "--boundary", head, "--stdin" },
+              { stdin = table.concat(excluded, "\n") .. "\n", timeout = options.timeout },
+              function(err, out)
+                if err then
+                  done(err)
+                  return
+                end
+                for oid in out:gmatch("%-([0-9a-f]+)") do
+                  frontier[#frontier + 1] = oid
+                end
+                fork_point(1)
+              end
+            )
+          end
         end
+      )
+    end
+    local preferred = context.configured or (context.default and context.default.ref)
+    local function use_preferred()
+      if not preferred then
+        find_base()
+        return
       end
-    )
+      local label = preferred:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
+      local source = context.configured and "gh-merge-base" or "default"
+      resolve(owner, root, preferred, options, function(err, tip)
+        if err then
+          done(err)
+          return
+        end
+        if options.merge_base == false then
+          deliver(tip, label, source, preferred)
+          return
+        end
+        -- Reflogs can retain the true fork after the target was rewritten.
+        -- A missing fork-point falls back to the ordinary shared ancestor.
+        owner:run(root, { "merge-base", "--fork-point", preferred, head }, options, function(fork_err, fork)
+          if not fork_err then
+            deliver(vim.trim(fork), label, source, preferred)
+          else
+            owner:run(root, { "merge-base", tip, head }, options, function(merge_err, base)
+              if merge_err then
+                done(merge_err)
+              else
+                deliver(vim.trim(base), label, source, preferred)
+              end
+            end)
+          end
+        end)
+      end)
+    end
+    if context.configured then
+      use_preferred()
+    elseif name == trunk and tracking then
+      resolve(owner, root, "@{upstream}", options, function(err, upstream)
+        if err then
+          use_preferred()
+          return
+        end
+        owner:run(root, { "rev-parse", "--abbrev-ref", "@{upstream}" }, options, function(_, label)
+          deliver(upstream, label and vim.trim(label) or "upstream", "upstream", tracking)
+        end)
+      end)
+    else
+      use_preferred()
+    end
   end)
 end
 
@@ -811,16 +818,37 @@ local function endpoints(owner, root, options, done)
           local right = mode == "branch" and endpoint("worktree") or endpoint("commit", head_oid, head)
           right.branch = mode == "branch" and head or nil
           right.head = mode == "branch" and head_oid or nil
+          local function deliver(err, oid)
+            if err then
+              done(err)
+              return
+            end
+            local label = mode == "branch" and base:gsub("^refs/heads/", ""):gsub("^refs/remotes/", "")
+              or base
+            local left = endpoint("commit", oid, label)
+            if mode == "branch" then
+              left.ref, left.base_source = base, options._base_source or "explicit"
+            end
+            if mode == "branch" and head == "HEAD" then
+              owner:run(
+                root,
+                { "symbolic-ref", "--quiet", "--short", "HEAD" },
+                options,
+                function(name_err, name)
+                  right.branch = not name_err and vim.trim(name) or "HEAD"
+                  done(nil, left, right)
+                end
+              )
+            else
+              done(nil, left, right)
+            end
+          end
           if options.merge_base == true or (mode == "branch" and options.merge_base ~= false) then
             owner:run(root, { "merge-base", base_oid, head_oid }, options, function(merge_err, output)
-              done(
-                merge_err,
-                not merge_err and endpoint("commit", output:gsub("\n$", ""), base) or nil,
-                right
-              )
+              deliver(merge_err, not merge_err and output:gsub("\n$", "") or nil)
             end)
           else
-            done(nil, endpoint("commit", base_oid, base), right)
+            deliver(nil, base_oid)
           end
         end)
       end
@@ -1697,7 +1725,7 @@ end
 -- edits never acquire a historical commit identity or source coordinate.
 local function load_branch(owner, root, options, branch, done)
   local groups, files = {}, {}
-  local label = "Branch " .. (branch.right.branch or "HEAD") .. " vs " .. branch.left.label
+  local label = "Branch " .. (branch.right.branch or "HEAD") .. " vs " .. Refs.label(branch.left)
   owner:run(
     root,
     { "rev-list", "--reverse", "--first-parent", "--parents", branch.left.rev .. ".." .. branch.right.head },
@@ -1822,6 +1850,19 @@ local function load_branch(owner, root, options, branch, done)
   )
 end
 
+--- List base choices for a loaded branch review. The view owns this request
+--- separately from diff loads so a refresh cannot discard an open picker.
+function M.bases(opts, callback)
+  local options = defaults(opts)
+  local owner = scope(callback)
+  Refs.read(owner, options.cwd or vim.fn.getcwd(), options.head, options, function(err, context)
+    owner:finish(err, not err and Refs.choices(context, options.left) or nil)
+  end)
+  return function()
+    owner:cancel()
+  end
+end
+
 --- Load one comparison without moving refs, touching the index, or opening buffers.
 --- Returned commit endpoints and index blob IDs stay pinned even if Git changes
 --- afterward. Worktree sources are mutable and must pass model hydration checks.
@@ -1872,7 +1913,9 @@ function M.load(opts, callback)
         local snapshot = {
           root = root,
           label = options.mode == "working" and "Uncommitted vs " .. left.label
-            or options.mode == "branch" and ("Branch " .. (right.branch or "HEAD") .. " vs " .. left.label .. " · commits + uncommitted")
+            or options.mode == "branch" and ("Branch " .. (right.branch or "HEAD") .. " vs " .. Refs.label(
+              left
+            ) .. " · commits + uncommitted")
             or left.label .. " → " .. right.label,
           left = left,
           right = right,

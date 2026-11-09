@@ -544,6 +544,9 @@ function Tree:help()
     "",
     "q / Escape     Close help",
   }
+  if self.data.branch then
+    table.insert(lines, #lines - 1, "gb             Choose comparison base")
+  end
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].bufhidden, vim.bo[buf].modifiable = "wipe", false
   local width, height = math.min(65, vim.o.columns - 4), math.min(#lines, vim.o.lines - 4)
