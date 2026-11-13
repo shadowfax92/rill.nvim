@@ -113,6 +113,25 @@ function M.gutter(win)
   return ("%%#%s#%" .. width .. "s %s %%*"):format(group, num(cell_for(row, binding.side)), sign)
 end
 
+local CTRL_O = vim.keycode("<C-o>")
+
+-- Enter jumps from the review (its own tab) to a source window elsewhere, a
+-- jump no jumplist can hold. That window remembers the jumplist position it
+-- landed on: C-o at that position or older returns to the review as it was
+-- left; anywhere newer it is the ordinary jump back, count included. A closed
+-- review, a counted C-o or a window Rill never opened falls through the same.
+local function jump_back()
+  local mark = vim.w.rill_return
+  local session = mark and M.sessions[mark.tab]
+  if vim.v.count == 0 and session and session.id == mark.session and not session.closed then
+    if vim.fn.getjumplist()[2] <= mark.position then
+      session:resume()
+      return
+    end
+  end
+  api.nvim_feedkeys((vim.v.count > 0 and tostring(vim.v.count) or "") .. CTRL_O, "n", false)
+end
+
 local function initialize()
   if initialized then
     return
@@ -1718,8 +1737,28 @@ function Session:toggle_file()
   if not file then
     return
   end
+  local anchor = self:header_anchor(file)
   self.collapsed[file.meta.id] = not self.collapsed[file.meta.id]
-  self:render({ file_id = file.meta.id, kind = "file" })
+  self:render(anchor)
+end
+
+-- The cursor target after a file body folds or opens: that file's header, held
+-- at its current screen row when visible, else at the cursor's row. Without an
+-- offset restore() puts the target three rows from the top, so every za/zA
+-- jerked a mid-screen header up the window.
+function Session:header_anchor(file)
+  local anchor = { file_id = file.meta.id, kind = "file" }
+  local win = valid_win(self.last_code_win) and self.last_code_win or self.main_win
+  if not valid_win(win) then
+    return anchor
+  end
+  local view = api.nvim_win_call(win, function()
+    return { top = vim.fn.line("w0"), bottom = vim.fn.line("w$"), cursor = vim.fn.line(".") }
+  end)
+  local header = self.file_rows[file.meta.id]
+  local visible = header and header >= view.top and header <= view.bottom
+  anchor.offset = (visible and header or view.cursor) - view.top
+  return anchor
 end
 
 -- zA: fold every file body to its header, or open them all when every file is
@@ -1734,15 +1773,16 @@ function Session:toggle_all_files()
     end
   end
   local anchor = self:anchor()
+  -- A folded file's code rows vanish; keep the cursor on that file's header,
+  -- held where it is on screen.
+  if anchor and anchor.file_id and open then
+    anchor = self:header_anchor(self.by_id[anchor.file_id])
+  end
   self.fold_all, self.collapsed = open, {}
   if open then
     for _, file in ipairs(self.files) do
       self.collapsed[file.meta.id] = true
     end
-  end
-  -- A folded file's code rows vanish; keep the cursor on that file's header.
-  if anchor and anchor.file_id and open then
-    anchor = { file_id = anchor.file_id, kind = "file" }
   end
   self:render(anchor)
 end
@@ -1838,15 +1878,16 @@ function Session:open_source()
     local function normal(win)
       return available(win) and vim.bo[api.nvim_win_get_buf(win)].buftype == ""
     end
-    local target = (normal(self.origin_win) or start_screen(self.origin_win)) and self.origin_win or nil
-    if not target then
-      for _, win in ipairs(api.nvim_list_wins()) do
-        if normal(win) then
-          target = win
-          break
-        end
-      end
+    -- The review keeps its tab; sources open in the review's file tab, made
+    -- next to it on first use and reused by later Enters, so the reviewer's
+    -- own windows are never replaced. Only a launch window holding nothing
+    -- (a fresh empty buffer, start screen or dashboard) is reused instead.
+    local function fresh(win)
+      return start_screen(win) or normal(win) and empty(api.nvim_win_get_buf(win))
     end
+    local target = normal(self.source_win) and self.source_win
+      or fresh(self.origin_win) and self.origin_win
+      or nil
     local buf = vim.fn.bufadd(location.path)
     vim.fn.bufload(buf)
     vim.bo[buf].buflisted = true
@@ -1860,12 +1901,19 @@ function Session:open_source()
         vim.bo[previous].buflisted = false
       end
     else
-      -- Splitting the current buffer creates no empty buffer. Then install the
-      -- source explicitly: :tab sbuffer honors switchbuf and could jump back
-      -- into a sidebar/preview window that the destination checks rejected.
+      -- Split from the review so the new tab lands right after it. Splitting
+      -- creates no empty buffer, and the review's window options are local to
+      -- its buffer, so the source gets the editor's own. Install the source
+      -- explicitly: :tab sbuffer honors switchbuf and could jump back into a
+      -- sidebar/preview window that the destination checks rejected.
+      local review = valid_win(self.last_code_win) and self.last_code_win or self.main_win
+      if valid_win(review) then
+        api.nvim_set_current_win(review)
+      end
       vim.cmd("tab split")
       api.nvim_win_set_buf(0, buf)
     end
+    self:own_source_window(api.nvim_get_current_win())
     -- BufEnter hooks or an edit during the asynchronous Git read can change
     -- the destination again; never publish a cursor outside the actual buffer.
     local target_line = math.max(1, math.min(location.line, api.nvim_buf_line_count(buf)))
@@ -1874,6 +1922,7 @@ function Session:open_source()
     local text = api.nvim_buf_get_lines(buf, location.line - 1, location.line, false)[1] or ""
     api.nvim_win_set_cursor(0, { location.line, math.min(column, #text) })
     vim.cmd("normal! zz")
+    self:mark_return(api.nvim_get_current_win(), buf)
     if not location.exact then
       local endpoint = file.snapshot.right
       notify(
@@ -1883,6 +1932,72 @@ function Session:open_source()
       )
     end
   end)
+end
+
+-- Make C-o in the window Enter just filled come back here (see jump_back).
+-- The mapping is installed once per buffer and decides per window at press
+-- time, so later visits to the same file elsewhere keep the ordinary C-o.
+function Session:mark_return(win, buf)
+  vim.w[win].rill_return = { tab = self.tab, session = self.id, position = vim.fn.getjumplist(win)[2] }
+  if not vim.b[buf].rill_return then
+    vim.b[buf].rill_return = true
+    vim.keymap.set(
+      "n",
+      "<C-o>",
+      jump_back,
+      { buffer = buf, desc = "Rill: back to the review, else jump back" }
+    )
+  end
+  if not self.return_hinted then
+    self.return_hinted = true
+    notify("C-o (or :q) returns to the review")
+  end
+end
+
+-- Remember the window Enter fills so later Enters reuse it. Quitting it when
+-- it is the last window of its tab (:q, :wq, ZZ on the file) returns to the
+-- review; Neovim would otherwise pick the next tab over. QuitPre is the hook
+-- because it runs in the window being quit: by WinClosed the current window
+-- has already moved on. The return waits until the window is really gone, so
+-- a refused :q (unsaved changes) stays put.
+function Session:own_source_window(win)
+  if self.source_win == win then
+    return
+  end
+  self.source_win = win
+  api.nvim_create_autocmd("QuitPre", {
+    callback = function()
+      if self.closed or self.source_win ~= win or not valid_win(win) then
+        return true -- stale: this review or window is done; drop the hook
+      end
+      if api.nvim_get_current_win() ~= win then
+        return
+      end
+      for _, other in ipairs(api.nvim_tabpage_list_wins(api.nvim_win_get_tabpage(win))) do
+        if other ~= win and api.nvim_win_get_config(other).relative == "" then
+          return
+        end
+      end
+      vim.schedule(function()
+        if not valid_win(win) then
+          self:resume()
+        end
+      end)
+    end,
+  })
+end
+
+--- Bring the review back as it was left: its tab and last-used window, with
+--- the commit, cursor, folds and expansions it had.
+function Session:resume()
+  if self.closed or not api.nvim_tabpage_is_valid(self.tab) then
+    return
+  end
+  api.nvim_set_current_tabpage(self.tab)
+  local win = valid_win(self.last_code_win) and self.last_code_win or self.main_win
+  if valid_win(win) then
+    api.nvim_set_current_win(win)
+  end
 end
 
 function Session:help()
@@ -1895,7 +2010,7 @@ function Session:help()
     "gf        focus current file / return to stream",
     "[f / ]f   previous / next file",
     "[c / ]c   previous / next hunk",
-    "Enter     open source · expand gap · select tree file",
+    "Enter     open source (C-o there returns) · expand gap · select tree file",
     "zo / zB   reveal 20 lines from top / bottom of gap",
     "zO        expand entire gap",
     "zR        show full current file",

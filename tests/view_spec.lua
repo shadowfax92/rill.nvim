@@ -203,6 +203,10 @@ local function with_review(fn, options)
   for _, buf in ipairs(api.nvim_list_bufs()) do
     initial_buffers[buf] = true
   end
+  local initial_tabs = {}
+  for _, tab in ipairs(api.nvim_list_tabpages()) do
+    initial_tabs[tab] = true
+  end
   local origin_win, previous_buf = api.nvim_get_current_win(), api.nvim_get_current_buf()
   -- Headless windows are narrow enough that the winbar sheds its title; cases
   -- asserting on titles widen the screen before the review lays out its panes.
@@ -218,9 +222,12 @@ local function with_review(fn, options)
   local control = backend(snapshot, sources, options)
   control.working_source = real_git.working_source
   package.loaded["rill.git"] = options.real_git and real_git or control
-  local notifications = {}
+  -- The first Enter of each review hints that C-o returns to it. Count that
+  -- hint apart, so cases asserting exact notices keep asserting only theirs.
+  local notifications, hints = {}, {}
   vim.notify = function(message)
-    notifications[#notifications + 1] = message
+    local list = message == "C-o (or :q) returns to the review" and hints or notifications
+    list[#list + 1] = message
   end
   local origin_buf = api.nvim_create_buf(true, false)
   api.nvim_buf_set_lines(origin_buf, 0, -1, false, { "unsaved work", "keep me" })
@@ -270,6 +277,7 @@ local function with_review(fn, options)
       origin_win = origin_win,
       origin_buf = origin_buf,
       notifications = notifications,
+      hints = hints,
       unnamed_before = unnamed_before,
     })
   end, debug.traceback)
@@ -277,6 +285,15 @@ local function with_review(fn, options)
     pcall(function()
       session:close()
     end)
+  end
+  -- Enter's file tab outlives the review by design; close what a case left.
+  for _, tab in ipairs(api.nvim_list_tabpages()) do
+    if not initial_tabs[tab] and #api.nvim_list_tabpages() > 1 then
+      pcall(function()
+        api.nvim_set_current_tabpage(tab)
+        vim.cmd("tabclose!")
+      end)
+    end
   end
   if api.nvim_win_is_valid(origin_win) then
     api.nvim_set_current_win(origin_win)
@@ -348,6 +365,16 @@ local function place(session, side, line, file_id)
   api.nvim_set_current_win(win)
   api.nvim_win_set_cursor(win, { at_source(session, side, line, file_id), 0 })
   session:cursor_changed(api.nvim_win_get_buf(win))
+end
+
+-- Enter opens sources in the review's file tab: wait for a real file to be
+-- current outside the review's own tab.
+local function source_opened(session)
+  return vim.wait(1000, function()
+    return api.nvim_get_current_tabpage() ~= session.tab
+      and vim.bo.buftype == ""
+      and api.nvim_buf_get_name(0) ~= ""
+  end, 1)
 end
 
 -- Invoke the review buffer's own mapping, as a keypress would.
@@ -971,9 +998,7 @@ return {
       env.snapshot.right = { kind = "commit", rev = "HEAD", label = "HEAD" }
       place(session, "new", 4)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(env.root .. "/src/new name.lua", api.nvim_buf_get_name(0))
       H.eq("", vim.bo.buftype)
       H.eq(4, api.nvim_win_get_cursor(0)[1])
@@ -997,9 +1022,7 @@ return {
         end
         place(session, "new", 4)
         session:open_source()
-        H.ok(vim.wait(1000, function()
-          return api.nvim_get_current_win() == env.origin_win
-        end, 1))
+        H.ok(source_opened(session))
         H.eq(path, api.nvim_buf_get_name(0))
         H.eq(5, api.nvim_win_get_cursor(0)[1])
         H.eq({}, env.notifications, "unchanged text shifts exactly")
@@ -1013,16 +1036,12 @@ return {
       H.write(env.root, "src/new name.lua", { "first", "second", "third", "edited", "same tail" })
       place(session, "new", 4)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(4, api.nvim_win_get_cursor(0)[1])
       H.ok(env.notifications[1]:find("nearest line", 1, true))
       place(session, "old", 5)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(env.root .. "/src/new name.lua", api.nvim_buf_get_name(0))
       H.eq(4, api.nvim_win_get_cursor(0)[1])
     end)
@@ -1034,9 +1053,7 @@ return {
       H.command({ "git", "mv", "src/new name.lua", "src/renamed.lua" }, env.root)
       place(session, "new", 4)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(env.root .. "/src/renamed.lua", api.nvim_buf_get_name(0))
       H.eq(4, api.nvim_win_get_cursor(0)[1])
       H.command({ "git", "rm", "-f", "src/renamed.lua" }, env.root)
@@ -1185,6 +1202,108 @@ return {
     end)
   end,
 
+  ["Enter opens one file tab beside the review, reused, and :q returns"] = function()
+    with_review(function(session, env)
+      local tabs = #api.nvim_list_tabpages()
+      place(session, "new", 4)
+      local review_win = api.nvim_get_current_win()
+      session:open_source()
+      H.ok(source_opened(session))
+      local file_win, file_tab = api.nvim_get_current_win(), api.nvim_get_current_tabpage()
+      H.eq(tabs + 1, #api.nvim_list_tabpages())
+      -- Right after the review's tab, leaving the reviewer's own window alone.
+      H.eq(api.nvim_tabpage_get_number(session.tab) + 1, api.nvim_tabpage_get_number(file_tab))
+      H.eq(env.origin_buf, api.nvim_win_get_buf(env.origin_win))
+      assert_editor_options(file_win)
+      -- A later Enter reuses that tab instead of opening another.
+      api.nvim_set_current_win(review_win)
+      place(session, "new", 1, "second")
+      session:open_source()
+      local reused = vim.wait(1000, function()
+        return api.nvim_buf_get_name(0) == env.root .. "/tests/new.lua"
+      end, 1)
+      H.ok(reused, api.nvim_buf_get_name(0) .. " " .. vim.inspect(env.notifications))
+      H.eq(file_win, api.nvim_get_current_win())
+      H.eq(tabs + 1, #api.nvim_list_tabpages())
+      -- Closing the file tab comes back to the review, not the next tab over.
+      vim.cmd("tabnew")
+      local other = api.nvim_get_current_tabpage()
+      api.nvim_set_current_tabpage(file_tab)
+      vim.cmd("quit")
+      H.ok(vim.wait(1000, function()
+        return api.nvim_get_current_tabpage() == session.tab
+      end, 1))
+      H.eq(review_win, api.nvim_get_current_win())
+      H.eq(false, api.nvim_tabpage_is_valid(file_tab))
+      api.nvim_set_current_tabpage(other)
+      vim.cmd("tabclose!")
+    end, { window_options = editor_options })
+  end,
+
+  ["C-o in the window Enter filled returns to the review as it was left"] = function()
+    with_review(function(session, env)
+      local function flush()
+        api.nvim_feedkeys("", "x", false)
+      end
+      place(session, "new", 4)
+      local review_win, review_row = api.nvim_get_current_win(), api.nvim_win_get_cursor(0)[1]
+      session:open_source()
+      H.ok(source_opened(session))
+      local source, file_win = api.nvim_get_current_buf(), api.nvim_get_current_win()
+      H.eq({ "C-o (or :q) returns to the review" }, env.hints)
+      press("<C-o>")
+      H.eq(session.tab, api.nvim_get_current_tabpage())
+      H.eq(review_win, api.nvim_get_current_win())
+      H.eq(review_row, api.nvim_win_get_cursor(0)[1])
+      -- Jumps made after landing are walked back first, then the review.
+      session:open_source()
+      H.ok(source_opened(session))
+      H.eq(file_win, api.nvim_get_current_win())
+      vim.cmd("normal! gg")
+      H.eq(1, api.nvim_win_get_cursor(0)[1])
+      press("<C-o>")
+      flush()
+      H.eq(file_win, api.nvim_get_current_win())
+      H.eq(4, api.nvim_win_get_cursor(0)[1])
+      press("<C-o>")
+      H.eq(review_win, api.nvim_get_current_win())
+      -- The hint is shown once per review.
+      H.eq(1, #env.hints)
+      -- Once the review is closed, C-o is the ordinary jump back again.
+      api.nvim_set_current_win(file_win)
+      vim.cmd("normal! G")
+      session:close()
+      api.nvim_set_current_win(file_win)
+      H.eq(source, api.nvim_get_current_buf())
+      press("<C-o>")
+      flush()
+      H.eq(file_win, api.nvim_get_current_win())
+      H.ok(api.nvim_win_get_cursor(0)[1] < api.nvim_buf_line_count(0))
+    end)
+  end,
+
+  ["za and zA keep the folded file's header on its screen row"] = function()
+    with_review(function(session)
+      api.nvim_set_current_win(session.main_win)
+      local header = session.file_rows.second
+      api.nvim_win_set_cursor(session.main_win, { header, 0 })
+      vim.fn.winrestview({ topline = 1 })
+      local offset = header - 1
+      press("za")
+      H.eq(true, session.collapsed.second)
+      H.eq(header, api.nvim_win_get_cursor(session.main_win)[1])
+      H.eq(offset, header - vim.fn.line("w0"))
+      press("za")
+      H.eq(offset, session.file_rows.second - vim.fn.line("w0"))
+      -- From inside a file's code, zA holds that file's header in place.
+      place(session, "new", 1, "second")
+      vim.fn.winrestview({ topline = 1 })
+      press("zA")
+      H.eq(session.file_rows.second, api.nvim_win_get_cursor(session.main_win)[1])
+      H.eq(1, vim.fn.line("w0"))
+    end)
+  end,
+
   ["document zA folds every file to its header, then opens them all"] = function()
     with_review(function(session)
       place(session, "new", 4)
@@ -1249,9 +1368,7 @@ return {
       H.write(env.root, "src/new name.lua", lines)
       place(session, "new", 4)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(5, api.nvim_win_get_cursor(0)[1])
       H.eq("replacement β", api.nvim_get_current_line())
       H.eq(false, vim.bo.modified)
@@ -1263,9 +1380,7 @@ return {
       env.snapshot.options = { max_file_bytes = 1, max_source_lines = 1 }
       place(session, "new", 4)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(env.root .. "/src/new name.lua", api.nvim_buf_get_name(0))
       H.eq(4, api.nvim_win_get_cursor(0)[1])
     end)
@@ -1278,9 +1393,7 @@ return {
       vim.fn.bufload(expected)
       place(session, "new", 5)
       session:open_source()
-      H.ok(vim.wait(1000, function()
-        return api.nvim_get_current_win() == env.origin_win
-      end, 1))
+      H.ok(source_opened(session))
       H.eq(expected, api.nvim_get_current_buf())
       H.eq(true, vim.bo[expected].modifiable)
       H.eq(5, api.nvim_win_get_cursor(0)[1])

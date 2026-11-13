@@ -63,7 +63,7 @@ lazy.nvim:
 | `gf` | focus the file |
 | `gm` | combined ↔ per commit |
 | `gb` | choose the branch comparison base |
-| `Enter` | open the source line, or expand hidden context |
+| `Enter` | open the source line in a tab beside the review (`C-o` or `:q` there comes back), or expand hidden context |
 | `g?` | every key |
 | `q` | close |
 
