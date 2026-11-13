@@ -1185,6 +1185,27 @@ return {
     end)
   end,
 
+  ["document zA folds every file to its header, then opens them all"] = function()
+    with_review(function(session)
+      place(session, "new", 4)
+      press("zA")
+      H.eq({ first = true, second = true }, session.collapsed)
+      for _, row in ipairs(session.rows) do
+        H.ok(row.kind ~= "code", "folded bodies must disappear")
+      end
+      H.eq("first", session:anchor().file_id)
+      -- Folded files read as a list: header after header, no separators.
+      H.eq(session.file_rows.first + 1, session.file_rows.second)
+      -- One open file is enough to make zA fold again rather than open.
+      press("za")
+      press("zA")
+      H.eq({ first = true, second = true }, session.collapsed)
+      press("zA")
+      H.eq({}, session.collapsed)
+      H.ok(at_source(session, "new", 4))
+    end)
+  end,
+
   ["cleanup completes when Files is the last window in the last tab"] = function()
     with_review(function(session)
       local buf, group = session.tree.buf, session.tree.augroup

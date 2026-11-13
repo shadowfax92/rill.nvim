@@ -86,7 +86,9 @@ their full paths and the comparison label even when the sidebar is truncated.
 `:Rill log` lists the newest 20 commits in the sidebar and shows the selected
 one as a stream under its full message. `Tab` / `S-Tab` move to the older /
 newer commit, `]f` / `[f` between its files, and `C-e` (or `Tab` past the last)
-loads 20 more. `za` on the message hides bodies; `--follow` tracks one file
+loads 20 more. `zA` folds every file to its header (kept as you walk), so
+`za` opens only the files you care about; `za` on the message hides bodies;
+`--follow` tracks one file
 across renames. `require("rill").open_history({ paths = {...} })` does the same
 from Lua.
 
