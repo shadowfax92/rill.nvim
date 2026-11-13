@@ -545,8 +545,9 @@ function Session:render(anchor)
           #tostring(row.new and row.new.line or 0)
         )
       end
+      -- The blank separates bodies only: folded files stay a compact list.
+      self.rows[#self.rows + 1] = { kind = "meta", file = file, text = "" }
     end
-    self.rows[#self.rows + 1] = { kind = "meta", file = file, text = "" }
   end
   local groups = self:groups()
   if groups then
@@ -1273,6 +1274,13 @@ function Session:load(opts)
       -- Fold and focus choices name files of the previous commit. A focused
       -- reviewer keeps focus mode, starting at the new commit's first file.
       self.collapsed, self.stream_anchor = {}, nil
+      if self.fold_all then
+        -- zA folded the walk down to file headers: each commit opens as its
+        -- file list, and za opens just the files worth reading.
+        for _, file in ipairs(files) do
+          self.collapsed[file.meta.id] = true
+        end
+      end
       if self.focus_id then
         self.focus_id, self.pending_focus = nil, true
       end
@@ -1701,6 +1709,31 @@ function Session:toggle_file()
   self:render({ file_id = file.meta.id, kind = "file" })
 end
 
+-- zA: fold every file body to its header, or open them all when every file is
+-- already folded, so a large comparison reads as a file list opened file by
+-- file with za. A history walk keeps the choice for the commits it reaches.
+function Session:toggle_all_files()
+  local open = false
+  for _, file in ipairs(self.files) do
+    if not self.collapsed[file.meta.id] then
+      open = true
+      break
+    end
+  end
+  local anchor = self:anchor()
+  self.fold_all, self.collapsed = open, {}
+  if open then
+    for _, file in ipairs(self.files) do
+      self.collapsed[file.meta.id] = true
+    end
+  end
+  -- A folded file's code rows vanish; keep the cursor on that file's header.
+  if anchor and anchor.file_id and open then
+    anchor = { file_id = anchor.file_id, kind = "file" }
+  end
+  self:render(anchor)
+end
+
 function Session:toggle_tree()
   if self.tree:is_open() then
     self.tree:close()
@@ -1855,6 +1888,7 @@ function Session:help()
     "zR        show full current file",
     "zM        collapse unchanged context",
     "za        collapse / expand current file · tree: fold commit / directory",
+    "zA        collapse / expand every file (a file list to open with za)",
     "gT        toggle file tree",
     "gw        toggle wrapping (unified)",
     "gr        refresh comparison",
@@ -2055,6 +2089,12 @@ function Session:keys(buf)
       "Collapse file",
       function()
         self:toggle_file()
+      end,
+    },
+    ["zA"] = {
+      "Collapse / expand every file",
+      function()
+        self:toggle_all_files()
       end,
     },
     ["gT"] = {

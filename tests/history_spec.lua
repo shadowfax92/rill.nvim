@@ -417,6 +417,64 @@ return {
     end)
   end,
 
+  ["zA folds each walked commit to its file list; za opens one file"] = function()
+    local root = vim.uv.fs_realpath(H.repo())
+    for _, name in ipairs({ "a", "b" }) do
+      H.write(root, name .. "1.txt", { name .. " one" })
+      H.write(root, name .. "2.txt", { name .. " two" })
+      commit(root, "add " .. name)
+    end
+    local previous_notify = vim.notify
+    vim.notify = function() end
+    local session = require("rill").open_history({ cwd = root, syntax = false, sidekick = false })
+    local function headers()
+      return vim.tbl_filter(function(line)
+        return vim.startswith(line, "▾ ") or vim.startswith(line, "▸ ")
+      end, lines(session.main_win))
+    end
+    local function code_rows()
+      return #vim.tbl_filter(function(row)
+        return row.kind == "code"
+      end, session.rows)
+    end
+    local ok, err = pcall(function()
+      H.ok(vim.wait(5000, function()
+        return session.history.shown ~= nil and not session.history.loading
+      end, 10))
+      api.nvim_set_current_win(session.main_win)
+      -- From inside a file's code, folding keeps the cursor on that file.
+      local code = 1
+      while session.rows[code].kind ~= "code" do
+        code = code + 1
+      end
+      api.nvim_win_set_cursor(session.main_win, { code, 0 })
+      local file = session.rows[code].file
+      press("zA")
+      H.eq({ "▸ b1.txt  +1 −0", "▸ b2.txt  +1 −0" }, headers())
+      H.eq(0, code_rows())
+      H.eq(file, session.rows[api.nvim_win_get_cursor(session.main_win)[1]].file)
+      api.nvim_win_set_cursor(session.main_win, { session.file_rows["b2.txt"], 0 })
+      press("za")
+      H.eq({ "▸ b1.txt  +1 −0", "▾ b2.txt  +1 −0" }, headers())
+      -- The next commit opens as a file list too.
+      press("<Tab>")
+      H.ok(shows(session, 2))
+      H.eq({ "▸ a1.txt  +1 −0", "▸ a2.txt  +1 −0" }, headers())
+      -- With every file folded, zA opens them all and the walk follows.
+      press("zA")
+      H.eq({ "▾ a1.txt  +1 −0", "▾ a2.txt  +1 −0" }, headers())
+      press("<S-Tab>")
+      H.ok(shows(session, 1))
+      H.eq({ "▾ b1.txt  +1 −0", "▾ b2.txt  +1 −0" }, headers())
+    end)
+    session:close()
+    vim.notify = previous_notify
+    vim.fn.delete(root, "rf")
+    if not ok then
+      error(err, 0)
+    end
+  end,
+
   ["tabs in a message expand to git's 8-column stops"] = function()
     local root = vim.uv.fs_realpath(H.repo())
     H.write(root, "a.txt", { "a" })

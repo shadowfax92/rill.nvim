@@ -116,6 +116,8 @@ All mappings below are local to Rill buffers.
     zM          Collapse current file's unchanged context
     za          Collapse / expand the current file body; in the file tree,
                 fold the commit or directory under the cursor
+    zA          Collapse every file body to its header, or expand them all
+                when all are collapsed: a file list to open with za
     gT          Show / hide the file tree
     gw          Toggle unified wrapping (split remains unwrapped)
     gr          Refresh comparison
@@ -269,7 +271,10 @@ what it brought into its first parent.
     ]C / [C        same as Tab / S-Tab
     ]f / [f        next / previous file of this commit
     C-e            load the next page (replaces scrolling one line here)
-    za             on the message: hide / show bodies for every commit
+    za             on the message: hide / show bodies for every commit;
+                   on a file header: fold / open that file
+    zA             fold every file to its header / open them all; the walk
+                   keeps it, so each commit opens as a file list
     Enter          in Files: show that commit; on the shown one, its message;
                    on the last row, load more
 

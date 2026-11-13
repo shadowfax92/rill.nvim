@@ -29,7 +29,12 @@ function M.render(opts)
     end
     if opts.history then
       -- History walks commits with Tab; files keep their bracket motions.
-      vim.list_extend(actions, { { "Tab/S-Tab", "commits" }, { "C-e", "more" }, { "]f/[f", "files" } })
+      vim.list_extend(actions, {
+        { "Tab/S-Tab", "commits" },
+        { "C-e", "more" },
+        { "]f/[f", "files" },
+        { "zA", "fold files" },
+      })
     else
       actions[#actions + 1] = { "Tab/S-Tab", "files" }
     end
