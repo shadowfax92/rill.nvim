@@ -1850,6 +1850,144 @@ local function load_branch(owner, root, options, branch, done)
   )
 end
 
+-- One history record: \30 starts it, NUL separates the header fields, and \31
+-- closes the message body (bodies hold newlines but never NUL). With -z, Git
+-- then ends the commit with NUL and, under --follow --name-status, appends
+-- NUL-separated "status, path[, new path]" entries before the next \30.
+local LOG_FORMAT = "--format=%x1e%H%x00%P%x00%an%x00%ae%x00%ad%x00%s%x00%b%x1f"
+local LOG_FIELDS = 7
+
+-- Tokens are consumed in order rather than split on \30: a status entry says
+-- how many path tokens follow, so even a path holding \30 cannot start a record.
+local function parse_log(output, follow)
+  local tokens = vim.split(output, "\0", { plain = true })
+  local commits, commit, paths = {}, nil, nil
+  local function add(path)
+    if path and path ~= "" and not vim.tbl_contains(paths, path) then
+      paths[#paths + 1] = path
+    end
+  end
+  local index = 1
+  while index <= #tokens do
+    local token = tokens[index]
+    if token:sub(1, 1) == "\30" and index + LOG_FIELDS - 1 <= #tokens then
+      local fields = { token:sub(2) }
+      for offset = 1, LOG_FIELDS - 1 do
+        fields[#fields + 1] = tokens[index + offset]
+      end
+      index = index + LOG_FIELDS
+      if fields[1]:match("^%x+$") then
+        paths = {}
+        commit = {
+          oid = fields[1],
+          short = fields[1]:sub(1, 8),
+          parents = vim.split(fields[2], " ", { plain = true, trimempty = true }),
+          author = fields[3],
+          email = fields[4],
+          date = fields[5],
+          subject = fields[6],
+          body = (fields[7]:gsub("\31$", ""):gsub("%s+$", "")),
+        }
+        commit.merge, commit.root_commit = #commit.parents > 1, #commit.parents == 0
+        commits[#commits + 1] = commit
+        if follow then
+          commit.paths = paths
+        end
+      end
+    elseif commit and follow and token:match("^%s*%u") then
+      -- "M path", "R100 old new": a rename's review needs both names, or the
+      -- new file would show as a whole-file addition.
+      local status = token:match("^%s*(%u)")
+      if status == "R" or status == "C" then
+        add(tokens[index + 2])
+        add(tokens[index + 1])
+        index = index + 3
+      else
+        add(tokens[index + 1])
+        index = index + 2
+      end
+    else
+      index = index + 1
+    end
+  end
+  for _, item in ipairs(commits) do
+    if item.paths and #item.paths == 0 then
+      item.paths = nil
+    end
+  end
+  return commits
+end
+
+--- One page of history, newest first, for the history view. The first page
+--- resolves `rev` (default HEAD) and returns that OID as `head`; later pages pass
+--- it back so commits made meanwhile never shift pages already shown. `paths`
+--- limits the listing; `follow` (one path only) tracks a file across renames and
+--- gives each commit the `paths` that reproduce its change. Git returns nothing
+--- past a rename once --skip joins --follow, so follow pages list `skip + count`
+--- and drop the prefix already delivered (the order is deterministic).
+--- Callback: (err, { root, head, commits, done }). Each commit is
+--- { oid, short, parents, author, email, date, subject, body, merge, root_commit, paths? }.
+function M.log(opts, callback)
+  local owner = scope(callback)
+  local options = defaults(opts)
+  local paths = options.paths or {}
+  local follow = options.follow and #paths == 1
+  local skip, count = math.max(0, options.skip or 0), math.max(1, options.count or 20)
+  owner:run(options.cwd or uv.cwd(), { "rev-parse", "--show-toplevel" }, options, function(root_err, output)
+    if root_err then
+      owner:finish(root_err)
+      return
+    end
+    local root = output:gsub("\n$", "")
+    local function list(head)
+      local args = {
+        "log",
+        "--no-show-signature",
+        "--encoding=UTF-8",
+        "--no-color",
+        "-z",
+        "--date=format:%a %d %b %Y %H:%M %z",
+        LOG_FORMAT,
+      }
+      -- One commit beyond the page tells whether another page exists, so the
+      -- end is known on the page that reaches it rather than one press later.
+      local wanted = count
+      if follow then
+        wanted = skip + count
+        vim.list_extend(args, { "--follow", "--name-status", "--diff-merges=first-parent" })
+      elseif skip > 0 then
+        args[#args + 1] = "--skip=" .. skip
+      end
+      vim.list_extend(args, { "-n", tostring(wanted + 1), "--end-of-options", head, "--" })
+      vim.list_extend(args, paths)
+      owner:run(root, args, options, function(err, log)
+        if err then
+          owner:finish(err)
+          return
+        end
+        local listed = parse_log(log, follow)
+        local commits = vim.list_slice(listed, (follow and skip or 0) + 1, wanted)
+        owner:finish(nil, { root = root, head = head, commits = commits, done = #listed <= wanted })
+      end)
+    end
+    if options.head then
+      list(options.head)
+      return
+    end
+    resolve(owner, root, options.rev or "HEAD", options, function(err, oid, result)
+      if err then
+        local unknown = result and result.code == 1
+        owner:finish(unknown and ("No commits at " .. (options.rev or "HEAD")) or err)
+        return
+      end
+      list(oid)
+    end)
+  end)
+  return function()
+    owner:cancel()
+  end
+end
+
 --- List base choices for a loaded branch review. The view owns this request
 --- separately from diff loads so a refresh cannot discard an open picker.
 function M.bases(opts, callback)

@@ -35,6 +35,8 @@ COMMANDS                                                   *rill-commands*
     :Rill <rev>                    Same as :Rill commit <rev>
     :Rill commits <rev>...         Combined selection; gm toggles per commit
                                    (|rill-commits|)
+    :Rill log [rev] [--follow]     History, one commit at a time (|rill-history|)
+    :Rill history [rev]            Same as :Rill log
 
     Branch mode includes pushed feature commits. Base priority is an explicit
     or picked revision, branch.<current>.gh-merge-base (origin's ref preferred,
@@ -246,6 +248,39 @@ window title names the commit under the cursor, e.g. "[2/3] 1a2b3c4d Subject".
 Enter-to-source and |rill-context| use that commit's own revisions.
 
 ==============================================================================
+HISTORY                                                     *rill-history*
+
+:Rill log [rev] [--follow] [-- paths] and |rill.open_history()| browse history
+one commit at a time. Files lists the newest commits from rev (default HEAD,
+pinned when the review opens), 20 per page, one row each: >
+
+    ▾ 1a2b3c4d Subject of the commit on screen
+      └─ · ● lua/rill/view.lua
+    ▸ 5e6f7a8b An older commit
+    ↓ C-e / Enter: 20 more
+<
+The document shows the selected commit against its first parent (the empty
+tree for a root commit), as a stream by default (setup's history_view), under
+its message: subject, author, date, full OID, the body hard-wrapped to the
+window (at most 100 columns), then the file count and totals. A merge shows
+what it brought into its first parent.
+
+    Tab / S-Tab    older / newer commit; Tab past the last loads the next page
+    ]C / [C        same as Tab / S-Tab
+    ]f / [f        next / previous file of this commit
+    C-e            load the next page (replaces scrolling one line here)
+    za             on the message: hide / show bodies for every commit
+    Enter          in Files: show that commit; on the shown one, its message;
+                   on the last row, load more
+
+Each commit opens at its message. Folding the shown commit in Files holds while
+walking. paths limits both the listing and each diff; with --follow (or
+follow=true) and exactly one path, renames are followed and each commit's
+review uses that commit's names for the file, so a rename stays a rename.
+Sidekick on a Files commit row sends "commit <short> <subject>"; file rows
+carry the shown commit as their revision.
+
+==============================================================================
 CONFIGURATION                                               *rill-setup*
 
 With a local checkout and lazy.nvim: >lua
@@ -263,6 +298,8 @@ Defaults: >lua
     require("rill").setup({
       layout = "unified",                 -- "unified" or "split"
       view = "stream",                    -- "stream" or "focus" (|rill-focus|)
+      history_view = "stream",            -- initial view for |rill-history|
+      history_count = 20,                 -- history page size (C-e)
       commits_view = "combined",          -- "combined" or "commits"
       tree_width = 30,
       tree = { adaptive = true, max_width = 60, max_ratio = 0.4, resize_step = 5, icons = true },
@@ -316,6 +353,7 @@ asynchronously; the session owns cancellation and scratch-window cleanup. >lua
     rill.open_commit("HEAD~1", opts)
     rill.open_range("main", "HEAD", { paths = { "src" }, layout = "split" })
     rill.open_commits({ "HEAD~2", { rev = "HEAD", paths = { "lua" } } })
+    rill.open_history({ paths = { "lua/rill" }, count = 20 })
 <
 All opts tables are optional. Common fields:
 
@@ -337,6 +375,12 @@ rill.open_commits({commits}, {opts})                      *rill.open_commits()*
     paths = { ... } }; an item's paths override opts.paths, which is the
     default for items without paths. Repeated commits are dropped, first
     wins. Raises an error for an empty or malformed list.
+
+rill.open_history({opts})                                *rill.open_history()*
+    Browse history one commit at a time (|rill-history|). opts: rev (start,
+    default HEAD), paths (limits listing and diffs), follow (true tracks a
+    single path across renames), count (page size, default history_count),
+    plus the common fields. Raises an error for a non-positive count.
 
     rill.current()   Current tab's session, or nil
     rill.toggle()    Toggle layout in current review

@@ -7,6 +7,10 @@ local defaults = {
   -- "focus" opens on one file (Tab/S-Tab move between files); "stream" shows
   -- every file in one document. Either way gf toggles between the two.
   view = "stream",
+  -- History reads each commit whole, so it opens on the stream whatever `view`
+  -- says; gf still focuses one file. history_count is the page size (C-e).
+  history_view = "stream",
+  history_count = 20,
   commits_view = "combined",
   tree_width = 30,
   context_step = 20,
@@ -100,6 +104,26 @@ function M.open_commits(commits, opts)
   return M.open(opts)
 end
 
+---Browse history one commit at a time. Files lists the newest `count` commits
+---(default history_count); the document shows the selected one against its
+---first parent, under its full message. Tab/S-Tab walk older/newer commits,
+---C-e (or Tab past the last) loads the next page. `rev` is where the walk
+---starts (default HEAD, pinned on open); `paths` limits both the listing and
+---each diff; `follow = true` tracks a single path across renames.
+---@param opts? { cwd?: string, rev?: string, paths?: string[], follow?: boolean, count?: integer }
+function M.open_history(opts)
+  opts = vim.tbl_extend("force", {}, opts or {}, { mode = "history" })
+  opts.view = opts.view or config.history_view
+  opts.count = opts.count or config.history_count
+  if type(opts.count) ~= "number" or opts.count < 1 then
+    error("Rill history count must be a positive number")
+  end
+  if opts.paths ~= nil and type(opts.paths) ~= "table" then
+    error("Rill history paths must be a list")
+  end
+  return M.open(opts)
+end
+
 function M.current()
   return require("rill.view").current()
 end
@@ -161,6 +185,8 @@ function M.command(args)
       options.view = "focus"
     elseif value == "--stream" then
       options.view = "stream"
+    elseif value == "--follow" then
+      options.follow = true
     else
       positional[#positional + 1] = value
     end
@@ -185,6 +211,9 @@ function M.command(args)
       error("Usage: Rill commits <rev>... [-- paths]")
     end
     return M.open_commits(vim.list_slice(positional, 2), options)
+  elseif mode == "log" or mode == "history" then
+    options.rev = positional[2]
+    return M.open_history(options)
   end
   local base, head = mode:match("^(.-)%.%.%.(.-)$")
   if base then

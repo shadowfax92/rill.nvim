@@ -27,7 +27,12 @@ function M.render(opts)
     if opts.commits_view then
       actions[#actions + 1] = { "gm", opts.commits_view == "combined" and "per commit" or "combined" }
     end
-    actions[#actions + 1] = { "Tab/S-Tab", "files" }
+    if opts.history then
+      -- History walks commits with Tab; files keep their bracket motions.
+      vim.list_extend(actions, { { "Tab/S-Tab", "commits" }, { "C-e", "more" }, { "]f/[f", "files" } })
+    else
+      actions[#actions + 1] = { "Tab/S-Tab", "files" }
+    end
     -- Multi-commit reviews add commit jumps right after file movement, so they
     -- outlive the context shortcuts when a narrow pane sheds actions.
     if opts.commits then

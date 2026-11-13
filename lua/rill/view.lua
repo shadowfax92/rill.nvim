@@ -185,8 +185,10 @@ local function initialize()
       end
       if row.kind == "file" then
         mark(buf, line, { line_hl_group = "RillHeader", priority = 50 })
-      elseif row.kind == "group" then
+      elseif row.kind == "group" or row.kind == "commit" then
         mark(buf, line, { line_hl_group = "RillGroup", priority = 50 })
+      elseif row.kind == "message" and row.muted then
+        mark(buf, line, { line_hl_group = "RillMuted", priority = 50 })
       elseif row.kind == "gap" then
         mark(buf, line, { line_hl_group = "RillGap", priority = 50 })
       elseif row.kind == "hunk" or row.kind == "meta" then
@@ -323,7 +325,16 @@ function Session:titles()
   end
   local groups = self:groups()
   local title, count = nil, #self.files .. " files "
-  if groups then
+  local history = self.history
+  if history then
+    -- The listed position, with "+" while older pages remain unloaded.
+    local commit = history.shown
+    local index = commit and self:history_index(commit)
+    local total = #history.commits .. (history.done and "" or "+")
+    title = commit and ("[%s/%s] %s %s"):format(index or "?", total, commit.short, commit.subject)
+      or "Loading history…"
+    count = #self.files .. " files · " .. self:history_title() .. " "
+  elseif groups then
     -- One composite comparison spans several commits; name the commit under
     -- the cursor instead of the first parent → last commit endpoints.
     local index = groups[self.current_group] and self.current_group or 1
@@ -354,6 +365,7 @@ function Session:titles()
         commits = groups ~= nil,
         commits_view = self.snapshot and self.snapshot.commits_view,
         branch = self.opts.mode == "branch",
+        history = history ~= nil,
       })
       api.nvim_set_option_value("winbar", bar, { win = win, scope = "local" })
       api.nvim_set_option_value(
@@ -434,7 +446,9 @@ function Session:restore(anchor)
   if not anchor then
     return
   end
-  local target = self.file_rows[anchor.file_id] or (anchor.group and self.group_rows[anchor.group])
+  local target = self.file_rows[anchor.file_id]
+    or (anchor.group and self.group_rows[anchor.group])
+    or ((anchor.kind == "commit" or anchor.kind == "message") and self.message_row)
   for i, row in ipairs(self.rows) do
     if row.file and row.file.meta.id == anchor.file_id then
       local cell
@@ -503,6 +517,7 @@ function Session:render(anchor)
   end
   self.rendering = true
   self.rows, self.file_rows, self.hunk_rows, self.group_rows = {}, {}, {}, {}
+  self.message_row = nil
   self.digits = 4
   local model = require("rill.model")
   local function add_file(file)
@@ -571,6 +586,9 @@ function Session:render(anchor)
       end
     end
   else
+    if self.history and self.history.shown then
+      self:message_rows(self.history.shown)
+    end
     for _, file in ipairs(self.files) do
       if not self.focus_id or file.meta.id == self.focus_id then
         add_file(file)
@@ -578,7 +596,9 @@ function Session:render(anchor)
     end
   end
   if #self.rows == 0 then
-    local empty = self.snapshot and "No changes in this comparison." or "Loading Git changes…"
+    local empty = self.snapshot and "No changes in this comparison."
+      or self.history and "Loading history…"
+      or "Loading Git changes…"
     if self.snapshot and self.snapshot.branch then
       empty = "No changes vs " .. Refs.label(self.snapshot.branch.left) .. " — gb picks another base"
     end
@@ -622,10 +642,262 @@ function Session:render(anchor)
   self:queue_visible()
 end
 
+-- Hard-wrap one message line: the review buffer does not soft-wrap by default
+-- and Git bodies are often unwrapped paragraphs. Bullets keep a hanging indent;
+-- lines indented like code keep their shape and are only cut by the window.
+local function wrap_message(line, width)
+  -- Raw tabs would render as "\t". Expand to 8-column stops, as `git show`
+  -- displays them, so tab-aligned text inside a message keeps its columns.
+  if line:find("\t", 1, true) then
+    local column = 0
+    line = line:gsub("([^\t]*)\t", function(text)
+      column = column + vim.fn.strdisplaywidth(text)
+      local pad = 8 - column % 8
+      column = column + pad
+      return text .. string.rep(" ", pad)
+    end)
+  end
+  if vim.fn.strdisplaywidth(line) <= width or line:match("^    ") then
+    return { line }
+  end
+  local marker = line:match("^%s*[-*•+]%s+") or line:match("^%s*%d+[.)]%s+") or line:match("^%s*")
+  local hang = string.rep(" ", vim.fn.strdisplaywidth(marker))
+  local lines, current = {}, nil
+  for word in line:sub(#marker + 1):gmatch("%S+") do
+    if not current then
+      current = marker .. word
+    elseif vim.fn.strdisplaywidth(current .. " " .. word) <= width then
+      current = current .. " " .. word
+    else
+      lines[#lines + 1] = current
+      current = hang .. word
+    end
+  end
+  lines[#lines + 1] = current or line
+  return lines
+end
+
+-- A history document opens with the commit itself, as `git show` does: subject,
+-- author, date, full OID and message body, then the scoped change totals. za on
+-- these rows hides or shows the body for every commit in the session.
+function Session:message_rows(commit)
+  local rows, history = self.rows, self.history
+  local body = commit.body ~= "" and vim.split(commit.body, "\n", { plain = true }) or {}
+  local function add(text, muted)
+    rows[#rows + 1] = { kind = "message", muted = muted, text = text }
+  end
+  self.message_row = #rows + 1
+  rows[#rows + 1] = {
+    kind = "commit",
+    text = ("%s %s  %s"):format(
+      #body == 0 and "●" or history.collapsed and "▸" or "▾",
+      commit.short,
+      commit.subject
+    ),
+  }
+  local note = commit.merge and " · merge: changes vs first parent"
+    or commit.root_commit and " · root commit"
+    or ""
+  add("  Author: " .. commit.author .. " <" .. commit.email .. ">", true)
+  add("  Date:   " .. commit.date, true)
+  add("  Commit: " .. commit.oid .. note, true)
+  if #body > 0 then
+    add("")
+    if history.collapsed then
+      add(("  … %d message %s hidden · za shows"):format(#body, #body == 1 and "line" or "lines"), true)
+    else
+      -- Rows are built before windows() opens or closes the split, so size
+      -- from both panes' total for the layout being drawn. The gutter is
+      -- digits*2+5 columns unified and digits+3 per split pane.
+      local total = api.nvim_win_get_width(self.main_win)
+      if valid_win(self.right_win) then
+        total = total + api.nvim_win_get_width(self.right_win) + 1
+      end
+      local pane = self.layout == "unified" and total - 13 or math.floor((total - 1) / 2) - 7
+      local width = math.max(30, math.min(100, pane - 3))
+      for _, line in ipairs(body) do
+        for _, piece in ipairs(wrap_message(line, width)) do
+          add(piece == "" and "" or "  " .. piece)
+        end
+      end
+    end
+  end
+  add("")
+  local additions, deletions = 0, 0
+  for _, file in ipairs(self.files) do
+    additions, deletions = additions + (file.meta.additions or 0), deletions + (file.meta.deletions or 0)
+  end
+  local scope = self.opts.paths and #self.opts.paths > 0 and (" in " .. table.concat(self.opts.paths, ", "))
+    or ""
+  if #self.files == 0 then
+    add("  No changes" .. scope, true)
+  else
+    add(
+      ("  %d %s%s · +%d −%d"):format(
+        #self.files,
+        #self.files == 1 and "file" or "files",
+        scope,
+        additions,
+        deletions
+      ),
+      true
+    )
+  end
+  add("")
+end
+
+-- Index of a listed history commit, or nil once the list no longer holds it.
+function Session:history_index(commit)
+  for index, candidate in ipairs(self.history.commits) do
+    if candidate == commit then
+      return index
+    end
+  end
+end
+
+--- Load the next page of history (count commits) from the pinned head. `after`
+--- runs once that page lands; while a page is in flight a newer `after` replaces
+--- the pending one, so repeated Tab presses at the end take one step.
+function Session:more_history(after)
+  local history = self.history
+  if not history or self.closed then
+    return
+  end
+  if history.done then
+    if after then
+      after()
+    end
+    return
+  end
+  history.after = after or history.after
+  if history.busy then
+    return
+  end
+  history.busy = true
+  self:render_tree()
+  history.cancel = require("rill.git").log({
+    cwd = self.opts.cwd,
+    rev = self.opts.rev,
+    head = history.head,
+    paths = self.opts.paths,
+    follow = self.opts.follow,
+    skip = #history.commits,
+    count = history.count,
+  }, function(err, page)
+    history.busy, history.cancel = false, nil
+    if self.closed then
+      return
+    end
+    local next_step = history.after
+    history.after = nil
+    if err then
+      notify(tostring(err), vim.log.levels.ERROR)
+      if #history.commits == 0 then
+        self.error = tostring(err)
+        self:render()
+      else
+        self:render_tree()
+      end
+      return
+    end
+    history.head, history.done = page.head, page.done
+    vim.list_extend(history.commits, page.commits)
+    if #history.commits == 0 then
+      local scope = self.opts.paths
+          and #self.opts.paths > 0
+          and (" touch " .. table.concat(self.opts.paths, ", "))
+        or ""
+      self.error = "No commits" .. scope
+      self:render()
+      return
+    end
+    if not history.shown and not history.loading then
+      self:load()
+    else
+      self:render_tree()
+      self:titles()
+    end
+    if next_step then
+      next_step()
+    end
+  end)
+end
+
+--- Show the listed commit at `index`. Files follows at once; the document is
+--- replaced when that commit's comparison has loaded.
+function Session:show_commit(index)
+  local history = self.history
+  local commit = history and history.commits[index]
+  if not commit or self.closed then
+    return
+  end
+  history.index = index
+  -- A step queued behind a loading page belongs to an older choice; once the
+  -- reviewer picks a commit directly, that page must not move them again.
+  history.after = nil
+  self.tree:select(function(entry)
+    return entry.commit == commit
+  end)
+  -- Load unless this commit is already on its way, or on screen with nothing
+  -- else pending (returning to it must still cancel another commit's load).
+  if commit ~= history.loading and (commit ~= history.shown or history.loading) then
+    self:load()
+  end
+end
+
+-- Tab / S-Tab and ]C / [C in history: older (+1) or newer (-1). Stepping past
+-- the last listed commit loads the next page first, so the walk never dead-ends.
+function Session:step_commit(direction)
+  local history = self.history
+  local index = history.index + direction
+  if index < 1 then
+    notify("Already at the newest commit")
+  elseif history.commits[index] then
+    self:show_commit(index)
+  elseif history.done then
+    notify("Already at the oldest commit")
+  else
+    self:more_history(function()
+      if history.commits[index] then
+        self:show_commit(index)
+      else
+        notify("Already at the oldest commit")
+      end
+    end)
+  end
+end
+
+function Session:load_more_commits()
+  local history = self.history
+  if history.done then
+    notify(("All %d commits are listed"):format(#history.commits))
+  elseif not history.busy then
+    self:more_history()
+  end
+end
+
+function Session:toggle_message()
+  -- A commit without a body has nothing to hide; flipping the session-wide
+  -- choice here would silently hide the next commit's message.
+  if not self.history.shown or self.history.shown.body == "" then
+    return
+  end
+  self.history.collapsed = not self.history.collapsed
+  self:render({ kind = "commit" })
+end
+
+function Session:history_title()
+  local paths = self.opts.paths or {}
+  local root = self.snapshot and self.snapshot.root or self.opts.cwd or ""
+  return "History · " .. (#paths > 0 and table.concat(paths, ", ") or vim.fs.basename(root))
+end
+
 function Session:render_tree()
   self.tree:update({
     files = self.files,
     groups = self:groups(),
+    history = self.history,
+    title = self.history and self:history_title() or nil,
     current_file = self.current_file,
     branch = self.opts.mode == "branch",
     message = self.error and "Git error" or self.snapshot and "No changes" or "Loading…",
@@ -835,7 +1107,17 @@ function Session:load(opts)
   if self.closed then
     return
   end
-  local anchor = self:anchor()
+  local history = self.history
+  local commit = history and history.commits[history.index]
+  if history and not commit then
+    -- The list comes first; its first page then loads the newest commit.
+    self:more_history()
+    return
+  end
+  -- Moving to another commit starts its document at the message, not at
+  -- whatever source line happened to share a path with the previous commit.
+  local new_commit = commit and commit ~= history.shown
+  local anchor = not new_commit and self:anchor() or nil
   self.generation = self.generation + 1
   local generation = self.generation
   for _, cancel in pairs(self.jobs) do
@@ -849,6 +1131,13 @@ function Session:load(opts)
   end
   self.opts = vim.tbl_extend("force", self.opts, opts or {})
   local load_options = vim.tbl_extend("force", {}, self.opts)
+  if commit then
+    -- Each history entry is an ordinary commit review: first parent → commit,
+    -- limited to the listed paths (a followed rename carries both names).
+    load_options.mode, load_options.rev = "commit", commit.oid
+    load_options.paths = commit.paths or self.opts.paths
+    history.loading = commit
+  end
   -- Cached branch endpoints belong to a gm flip, never to a later refresh.
   self.opts._branch = nil
   self.error = nil
@@ -885,6 +1174,9 @@ function Session:load(opts)
         snapshot.dispose()
       end
       return
+    end
+    if history then
+      history.loading = nil
     end
     if err then
       self.error = tostring(err)
@@ -974,6 +1266,17 @@ function Session:load(opts)
         empty_focus = true
       end
     end
+    if commit then
+      history.shown = commit
+    end
+    if new_commit then
+      -- Fold and focus choices name files of the previous commit. A focused
+      -- reviewer keeps focus mode, starting at the new commit's first file.
+      self.collapsed, self.stream_anchor = {}, nil
+      if self.focus_id then
+        self.focus_id, self.pending_focus = nil, true
+      end
+    end
     local target = anchor
     if self.pending_focus and #files > 0 then
       -- view = "focus" applies once, on the first load that has files: an
@@ -991,6 +1294,12 @@ function Session:load(opts)
       local file = files[math.min(focus_index or 1, #files)]
       self.focus_id = file and file.meta.id
       target = file and { file_id = file.meta.id, kind = "file" } or anchor
+    end
+    if new_commit then
+      -- Focus (above) picks the new commit's file; the cursor still opens on
+      -- the message, in whichever pane the reviewer is reading.
+      local side = self.layout == "split" and self.last_code_win == self.right_win and "new" or nil
+      target = { kind = "commit", side = side }
     end
     self:render(target)
     for buf, binding in pairs(M.buffers) do
@@ -1369,11 +1678,20 @@ function Session:collapse_context()
 end
 
 function Session:toggle_file()
-  local file, _, entry = self:current()
+  local file, row, entry = self:current()
   -- In the tree, za folds the node under the cursor: a commit or a directory.
   local key = entry and (entry.key or entry.directory)
   if key then
     self.tree:toggle(entry)
+    return
+  end
+  if entry and entry.commit then
+    -- Only the shown history commit has files to fold; za opens any other.
+    self:show_commit(self:history_index(entry.commit))
+    return
+  end
+  if self.history and not entry and row and (row.kind == "commit" or row.kind == "message") then
+    self:toggle_message()
     return
   end
   if not file then
@@ -1568,6 +1886,14 @@ function Session:help()
     -- Right after the "[c / ]c" hunk line.
     table.insert(lines, 8, "[C / ]C   previous / next commit")
   end
+  if self.history then
+    lines[1] = "Rill · Git history"
+    lines[3] = "Tab / S-Tab  older / newer commit (Tab past the last loads more)"
+    table.insert(lines, 4, "]C / [C   older / newer commit")
+    table.insert(lines, 5, ("C-e       load %d more commits"):format(self.history.count))
+    table.insert(lines, 6, "za        on the message: hide / show commit bodies")
+    table.insert(lines, #lines - 2, "Each commit is its first-parent change, limited to the history's paths.")
+  end
   local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -1604,7 +1930,11 @@ function Session:comparison_keys(buf)
     pcall(vim.keymap.del, "n", "gb", { buffer = buf })
   end
   for key, direction in pairs({ ["]C"] = 1, ["[C"] = -1 }) do
-    if self:groups() then
+    if self.history then
+      vim.keymap.set("n", key, function()
+        self:step_commit(direction)
+      end, { buffer = buf, silent = true, desc = "Rill: older / newer commit" })
+    elseif self:groups() then
       vim.keymap.set("n", key, function()
         self:move_commit(direction)
       end, { buffer = buf, silent = true, desc = "Rill: move commit" })
@@ -1622,16 +1952,25 @@ function Session:keys(buf)
         self:close()
       end,
     },
+    -- History walks commits with Tab; ]f / [f still move between its files.
     ["<Tab>"] = {
-      "Next file",
+      self.history and "Older commit" or "Next file",
       function()
-        self:cycle_file(1)
+        if self.history then
+          self:step_commit(1)
+        else
+          self:cycle_file(1)
+        end
       end,
     },
     ["<S-Tab>"] = {
-      "Previous file",
+      self.history and "Newer commit" or "Previous file",
       function()
-        self:cycle_file(-1)
+        if self.history then
+          self:step_commit(-1)
+        else
+          self:cycle_file(-1)
+        end
       end,
     },
     ["gs"] = {
@@ -1746,6 +2085,16 @@ function Session:keys(buf)
       end,
     },
   }
+  if self.history then
+    -- The commit pickers' paging key. In a history review it outranks
+    -- scrolling one line, which j/k and Ctrl-d already cover.
+    actions["<C-e>"] = {
+      "Load more commits",
+      function()
+        self:load_more_commits()
+      end,
+    }
+  end
   for key, action in pairs(actions) do
     vim.keymap.set("n", key, action[2], { buffer = buf, silent = true, desc = "Rill: " .. action[1] })
   end
@@ -1763,6 +2112,10 @@ function Session:close()
   if self.base_cancel then
     self.base_cancel()
     self.base_cancel = nil
+  end
+  if self.history and self.history.cancel then
+    self.history.cancel()
+    self.history.cancel = nil
   end
   self.base_picker = nil
   self.generation = self.generation + 1
@@ -1832,6 +2185,18 @@ function M.open(opts)
     collapsed = {},
     generation = 0,
     cache = cache,
+    -- History sessions page through `git log` and show one commit at a time:
+    -- `commits` is every listed commit (newest first), `index` the one asked
+    -- for, `shown` the commit whose comparison is on screen (it trails `index`
+    -- while that commit's diff loads). Other modes leave this nil.
+    history = opts.mode == "history" and {
+      commits = {},
+      index = 1,
+      count = opts.count or 20,
+      done = false,
+      busy = false,
+      collapsed = false,
+    } or nil,
   }, Session)
   -- The panel owns its buffer/window lifecycle. The session registry only
   -- binds its rows to review identities for navigation and Sidekick capture.
@@ -1847,7 +2212,15 @@ function M.open(opts)
       M.buffers[buf] = nil
     end,
     on_select = function(entry)
-      if entry.file then
+      if entry.more then
+        self:load_more_commits()
+      elseif entry.commit and entry.commit == self.history.shown and not self.history.loading then
+        -- The shown commit: read its message at the top of the document.
+        self:render({ kind = "commit" })
+        api.nvim_set_current_win(self.main_win)
+      elseif entry.commit then
+        self:show_commit(self:history_index(entry.commit))
+      elseif entry.file then
         self:jump_file(entry.file)
       elseif entry.group and self.snapshot and self.snapshot.branch then
         self:jump_group(entry.group)
