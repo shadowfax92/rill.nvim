@@ -12,9 +12,11 @@ end, {
   nargs = "*",
   desc = "Open a Git review",
   complete = function(arglead)
+    local words = { "working", "staged", "unstaged", "branch", "commit", "range", "commits", "log" }
+    vim.list_extend(words, { "--split", "--unified", "--focus", "--stream", "--follow" })
     return vim.tbl_filter(function(value)
       return value:sub(1, #arglead) == arglead
-    end, { "working", "staged", "unstaged", "branch", "commit", "range", "--split", "--unified" })
+    end, words)
   end,
 })
 for name, action in pairs({

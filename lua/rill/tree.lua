@@ -70,14 +70,19 @@ end
 
 -- Fold keys include the commit group, so repeated paths in a multi-commit
 -- review remain independent. Compact directory chains leave room for filenames.
-local function entries(files, groups, folded)
+-- A history review lists every loaded commit as one row and nests files only
+-- under the commit on screen (`owner`), keyed by its OID like a group.
+local function entries(data, folded)
+  local files, groups, history = data.files or {}, data.groups, data.history
+  local shown = history and history.shown
   local roots = {}
   for i = 1, groups and #groups or 1 do
-    roots[i] = { children = {}, order = {}, key = groups and group_key(i, groups[i]) or "" }
+    local key = groups and group_key(i, groups[i]) or shown and ("@" .. shown.oid) or ""
+    roots[i] = { children = {}, order = {}, key = key }
   end
   for _, file in ipairs(files) do
     local group = groups and file.meta.group or 1
-    local node, path, relative = roots[group], groups and roots[group] and roots[group].key or "", ""
+    local node, path, relative = roots[group], roots[group] and roots[group].key or "", ""
     if node then
       node.first = node.first or file
       local parts = vim.split(file.meta.path, "/", { plain = true })
@@ -90,6 +95,7 @@ local function entries(files, groups, folded)
             path = path,
             relative = relative,
             group_index = groups and group or nil,
+            owner = shown,
             children = {},
             order = {},
           }
@@ -115,8 +121,13 @@ local function entries(files, groups, folded)
       end
       local last = index == #node.order
       local prefix = indent .. (last and "└─ " or "├─ ")
-      local entry =
-        { label = escape(label), prefix = prefix, parent = parent, group_index = child.group_index }
+      local entry = {
+        label = escape(label),
+        prefix = prefix,
+        parent = parent,
+        group_index = child.group_index,
+        owner = child.owner,
+      }
       if child.file then
         entry.file = child.file
       else
@@ -128,7 +139,28 @@ local function entries(files, groups, folded)
       end
     end
   end
-  if groups then
+  if history then
+    for _, commit in ipairs(history.commits) do
+      local entry = { commit = commit, prefix = "", label = escape(commit.short .. " " .. commit.subject) }
+      result[#result + 1] = entry
+      if commit == shown then
+        entry.key = roots[1].key
+        if not folded[entry.key] then
+          if #roots[1].order == 0 then
+            result[#result + 1] =
+              { placeholder = true, prefix = "  ", label = "(no changes)", parent = entry.key }
+          end
+          visit(roots[1], "  ", entry.key)
+        end
+      end
+    end
+    if #history.commits > 0 then
+      local label = history.busy and "Loading more commits…"
+        or history.done and ("All " .. #history.commits .. " commits listed")
+        or ("C-e / Enter: " .. history.count .. " more")
+      result[#result + 1] = { more = true, prefix = "", label = label }
+    end
+  elseif groups then
     for index, group in ipairs(groups) do
       local key, root = roots[index].key, roots[index]
       result[#result + 1] = {
@@ -211,7 +243,7 @@ function Tree:options_local()
     winfixwidth = true,
     scrollbind = false,
     cursorbind = false,
-    winbar = "%#RillHeader# Files",
+    winbar = "%#RillHeader# " .. (self.title or "Files"):gsub("%%", "%%%%"),
     fillchars = "eob: ",
   }) do
     api.nvim_set_option_value(key, value, { win = self.win, scope = "local" })
@@ -449,9 +481,33 @@ function Tree:resize(delta)
 end
 
 function Tree:update(data)
+  -- Walking history moves the open commit. Its files stay folded or open as
+  -- the reviewer left the previous commit's, so one za holds for the walk.
+  local shown = data.history and data.history.shown
+  if shown and self.shown and shown ~= self.shown then
+    self.folded["@" .. shown.oid] = self.folded["@" .. self.shown.oid]
+  end
+  self.shown = shown
   self.data = data
   self.current_file = data.current_file
+  if data.title ~= self.title then
+    self.title = data.title
+    self:options_local()
+  end
   self:render()
+end
+
+--- Move the cursor to the first row `match(entry)` accepts, if it is drawn.
+function Tree:select(match)
+  if not self:is_open() then
+    return
+  end
+  for index, entry in ipairs(self.entries) do
+    if match(entry) then
+      api.nvim_win_set_cursor(self.win, { index, 0 })
+      return
+    end
+  end
 end
 
 function Tree:render()
@@ -467,12 +523,17 @@ function Tree:render()
       parents[entry.key] = entry.parent
     end
   end
-  self.entries = entries(self.data.files or {}, self.data.groups, self.folded)
+  self.entries = entries(self.data, self.folded)
   local natural = self.initial_width
   for _, entry in ipairs(self.entries) do
     if entry.group or entry.directory then
       entry.symbol, entry.hl = self.folded[entry.key] and "▸" or "▾", "Directory"
       entry.suffix = entry.directory and "/" or ""
+    elseif entry.commit then
+      -- Only the shown commit has a key (and files); the rest open on Enter.
+      entry.symbol, entry.hl = entry.key and not self.folded[entry.key] and "▾" or "▸", "Directory"
+    elseif entry.more then
+      entry.symbol, entry.hl = "↓", "RillMuted"
     elseif entry.file then
       entry.symbol, entry.hl = icon(entry.file.meta.path, self.options.icons)
       entry.status = statuses[(entry.file.meta.status or "M"):sub(1, 1)] or statuses.M
@@ -513,7 +574,8 @@ function Tree:render()
     if entry.directory and vim.fn.strdisplaywidth(label) > room then
       label = vim.fn.pathshorten(label)
     end
-    lines[index] = prefix .. fit(label, room, not entry.group)
+    -- Commit subjects keep their start; paths keep their filename end.
+    lines[index] = prefix .. fit(label, room, not (entry.group or entry.commit or entry.more))
     if entry.key then
       by_key[entry.key] = index
     end
@@ -521,6 +583,9 @@ function Tree:render()
       prior
       and (
         (entry.key and prior.key == entry.key)
+        -- History rows keep identity as the shown commit (and its key) moves.
+        or (prior.commit and entry.commit == prior.commit)
+        or (prior.more and entry.more)
         or (
           not prior.key
           and not entry.group
@@ -561,10 +626,11 @@ function Tree:highlight(current)
   end
   api.nvim_buf_clear_namespace(self.buf, ns, 0, -1)
   local ancestors = {}
+  local shown = self.data.history and self.data.history.shown
   for _, file in ipairs(self.data.files or {}) do
     if file.meta.id == self.current_file then
       local group = self.data.groups and self.data.groups[file.meta.group]
-      local key = group and group_key(file.meta.group, group) or ""
+      local key = group and group_key(file.meta.group, group) or shown and ("@" .. shown.oid) or ""
       if key ~= "" then
         ancestors[key] = true
       end
@@ -596,11 +662,17 @@ function Tree:highlight(current)
     if entry.status then
       span(#entry.paint_indent + #entry.symbol + 1, #entry.status[1], entry.status[2])
     end
+    if entry.commit then
+      span(#entry.paint_indent + #entry.symbol + 1, #entry.commit.short, "RillMuted")
+    elseif entry.more then
+      span(0, #line, "RillMuted")
+    end
     -- File navigation respects explicit tree folds. Highlight the closed
     -- ancestor that contains the review's current file instead of reopening it.
     local selected = not entry.group and entry.file and entry.file.meta.id == self.current_file
       or entry.key and self.folded[entry.key] and ancestors[entry.key]
-    local hl = selected and "RillTreeCurrent" or entry.group and "RillGroup"
+    -- In history only the shown commit carries a key; it reads as the open group.
+    local hl = selected and "RillTreeCurrent" or (entry.group or entry.commit and entry.key) and "RillGroup"
     if hl then
       api.nvim_buf_set_extmark(self.buf, ns, index - 1, 0, { line_hl_group = hl })
     end
@@ -614,7 +686,7 @@ function Tree:activate()
   local entry = self:selected()
   if entry and entry.directory then
     self:toggle(entry)
-  elseif entry and (entry.file or entry.group) and self.on_select then
+  elseif entry and (entry.file or entry.group or entry.commit or entry.more) and self.on_select then
     self.on_select(entry)
   end
 end
@@ -634,7 +706,7 @@ function Tree:fold(action, scope)
   if scope ~= "all" and (not node or not node.key) then
     return
   end
-  local complete = entries(self.data.files or {}, self.data.groups, {})
+  local complete = entries(self.data, {})
   local close = action == "close"
   if action == "toggle" then
     -- Hidden descendants do not make a visibly closed tree open. Direction
@@ -676,10 +748,13 @@ function Tree:context(ctx, snapshot)
   local seen, selected_file = {}, nil
   for row = math.max(1, first), math.min(#self.entries, last) do
     local entry = self.entries[row]
-    local group = snapshot.groups and snapshot.groups[entry.group or entry.group_index]
+    -- History rows name their commit directly; groups resolve by position.
+    local group = entry.commit
+      or entry.owner
+      or snapshot.groups and snapshot.groups[entry.group or entry.group_index]
     local revision = group and (group.kind == "uncommitted" and "worktree" or group.oid or group.short)
     local item
-    if entry.group then
+    if entry.group or entry.commit then
       item = {
         kind = group.kind == "uncommitted" and "uncommitted" or "commit",
         revision = revision,
@@ -765,6 +840,17 @@ function Tree:help()
   }
   if self.data.branch then
     table.insert(lines, #lines - 1, "gb             Choose comparison base")
+  end
+  if self.data.history then
+    lines[1] = "History"
+    lines[3] = "Enter / o / l  Show commit · open file · expand directory"
+    table.insert(lines, 4, "Tab / S-Tab    Older / newer commit")
+    table.insert(lines, 5, "C-e            Load more commits (also Enter on the last row)")
+    for index, line in ipairs(lines) do
+      if vim.startswith(line, "Rill:") then
+        lines[index] = "Rill: gs layout, gf focus, gr reload commit, za on message hides bodies"
+      end
+    end
   end
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].bufhidden, vim.bo[buf].modifiable = "wipe", false
