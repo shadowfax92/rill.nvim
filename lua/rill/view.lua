@@ -1274,6 +1274,9 @@ function Session:load(opts)
       -- Fold and focus choices name files of the previous commit. A focused
       -- reviewer keeps focus mode, starting at the new commit's first file.
       self.collapsed, self.stream_anchor = {}, nil
+      -- The cursor opens on the message, which names no file; the previous
+      -- commit's path must not stand in for this one's current file.
+      self.current_file = files[1] and files[1].meta.id
       if self.fold_all then
         -- zA folded the walk down to file headers: each commit opens as its
         -- file list, and za opens just the files worth reading.
@@ -1503,6 +1506,9 @@ function Session:toggle_focus()
     self:render(file and self.stream_anchor or anchor)
     self.stream_anchor = nil
   else
+    -- Off a file (a history commit opens on its message), focus the review's
+    -- current file, which a new commit sets to its first.
+    file = file or self.by_id[self.current_file] or self.files[1]
     if not file then
       return
     end
@@ -1591,7 +1597,8 @@ function Session:cycle_file(direction)
   if #self.files == 0 then
     return
   end
-  local current = self:current()
+  -- On a row without a file (a history message), step from the focused file.
+  local current = self:current() or (self.focus_id and self.by_id[self.focus_id])
   local index = direction > 0 and 0 or 1
   for i, file in ipairs(self.files) do
     if file == current then
@@ -1603,6 +1610,12 @@ function Session:cycle_file(direction)
 end
 
 function Session:move(kind, direction)
+  if kind == "file" and self.focus_id then
+    -- Focus draws one file, so there is no next file row to move to: switch
+    -- the focused file instead. History needs this, as its Tab walks commits.
+    self:cycle_file(direction)
+    return
+  end
   local indexes = kind == "hunk" and self.hunk_rows or vim.tbl_values(self.file_rows)
   table.sort(indexes)
   local win = api.nvim_get_current_win()
