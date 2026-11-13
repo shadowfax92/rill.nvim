@@ -646,7 +646,17 @@ end
 -- and Git bodies are often unwrapped paragraphs. Bullets keep a hanging indent;
 -- lines indented like code keep their shape and are only cut by the window.
 local function wrap_message(line, width)
-  line = line:gsub("\t", "    ")
+  -- Raw tabs would render as "\t". Expand to 8-column stops, as `git show`
+  -- displays them, so tab-aligned text inside a message keeps its columns.
+  if line:find("\t", 1, true) then
+    local column = 0
+    line = line:gsub("([^\t]*)\t", function(text)
+      column = column + vim.fn.strdisplaywidth(text)
+      local pad = 8 - column % 8
+      column = column + pad
+      return text .. string.rep(" ", pad)
+    end)
+  end
   if vim.fn.strdisplaywidth(line) <= width or line:match("^    ") then
     return { line }
   end
@@ -822,10 +832,15 @@ function Session:show_commit(index)
     return
   end
   history.index = index
+  -- A step queued behind a loading page belongs to an older choice; once the
+  -- reviewer picks a commit directly, that page must not move them again.
+  history.after = nil
   self.tree:select(function(entry)
     return entry.commit == commit
   end)
-  if commit ~= history.shown or history.loading then
+  -- Load unless this commit is already on its way, or on screen with nothing
+  -- else pending (returning to it must still cancel another commit's load).
+  if commit ~= history.loading and (commit ~= history.shown or history.loading) then
     self:load()
   end
 end
@@ -1280,8 +1295,11 @@ function Session:load(opts)
       self.focus_id = file and file.meta.id
       target = file and { file_id = file.meta.id, kind = "file" } or anchor
     end
-    if new_commit and not target then
-      target = { kind = "commit" }
+    if new_commit then
+      -- Focus (above) picks the new commit's file; the cursor still opens on
+      -- the message, in whichever pane the reviewer is reading.
+      local side = self.layout == "split" and self.last_code_win == self.right_win and "new" or nil
+      target = { kind = "commit", side = side }
     end
     self:render(target)
     for buf, binding in pairs(M.buffers) do

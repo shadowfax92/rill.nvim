@@ -379,10 +379,66 @@ return {
       press("<Tab>")
       H.ok(shows(session, 2))
       H.eq("docs/guide.md", session.focus_id)
-      -- The message still heads the focused document.
+      -- The message heads the focused document, and the cursor opens on it.
       H.eq("commit", session.rows[1].kind)
-      H.eq("file", session.rows[api.nvim_win_get_cursor(session.main_win)[1]].kind)
+      H.eq({ 1, 0 }, api.nvim_win_get_cursor(session.main_win))
+      H.eq(1, vim.fn.line("w0", session.main_win))
     end)
+  end,
+
+  ["a step queued behind a page yields to a newer choice"] = function()
+    with_history(nil, function(session)
+      api.nvim_set_current_win(session.main_win)
+      press("<Tab>")
+      H.ok(shows(session, 2))
+      -- Tab past the last listed commit waits for page two; S-Tab meanwhile.
+      press("<Tab>")
+      H.eq(true, session.history.busy)
+      press("<S-Tab>")
+      H.ok(vim.wait(5000, function()
+        return #session.history.commits == 4 and not session.history.busy and not session.history.loading
+      end, 10))
+      vim.wait(50)
+      H.eq(1, session.history.index)
+      H.eq(session.history.commits[1], session.history.shown)
+    end)
+  end,
+
+  ["walking from the split After pane opens its cursor on the message"] = function()
+    with_history(nil, function(session)
+      api.nvim_set_current_win(session.main_win)
+      press("gs")
+      api.nvim_set_current_win(session.right_win)
+      api.nvim_win_set_cursor(session.right_win, { #session.rows, 0 })
+      session:cursor_changed(api.nvim_win_get_buf(session.right_win))
+      press("<Tab>")
+      H.ok(shows(session, 2))
+      H.eq({ 1, 0 }, api.nvim_win_get_cursor(session.right_win))
+    end)
+  end,
+
+  ["tabs in a message expand to git's 8-column stops"] = function()
+    local root = vim.uv.fs_realpath(H.repo())
+    H.write(root, "a.txt", { "a" })
+    commit(root, "tabs", "key\t= 1\nlonger_key\t= 2\n\tindented")
+    local previous_notify = vim.notify
+    vim.notify = function() end
+    local session = require("rill").open_history({ cwd = root, syntax = false, sidekick = false })
+    local ok, err = pcall(function()
+      H.ok(vim.wait(5000, function()
+        return session.history.shown ~= nil and not session.history.loading
+      end, 10))
+      H.eq(
+        { "  key     = 1", "  longer_key      = 2", "          indented" },
+        vim.list_slice(lines(session.main_win), 6, 8)
+      )
+    end)
+    session:close()
+    vim.notify = previous_notify
+    vim.fn.delete(root, "rf")
+    if not ok then
+      error(err, 0)
+    end
   end,
 
   ["message wrapping follows the layout being drawn"] = function()
