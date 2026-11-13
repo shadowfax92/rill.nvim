@@ -475,6 +475,54 @@ return {
     end
   end,
 
+  ["gf focuses from the message and ]f / [f walk the focused files"] = function()
+    local root = vim.uv.fs_realpath(H.repo())
+    for _, name in ipairs({ "a", "b" }) do
+      for index = 1, 3 do
+        H.write(root, ("%s%d.txt"):format(name, index), { name })
+      end
+      commit(root, "add " .. name)
+    end
+    local previous_notify = vim.notify
+    vim.notify = function() end
+    local session = require("rill").open_history({ cwd = root, syntax = false, sidekick = false })
+    local ok, err = pcall(function()
+      H.ok(vim.wait(5000, function()
+        return session.history.shown ~= nil and not session.history.loading
+      end, 10))
+      api.nvim_set_current_win(session.main_win)
+      -- Every commit opens on its message; gf there focuses the first file.
+      H.eq({ 1, 0 }, api.nvim_win_get_cursor(session.main_win))
+      press("gf")
+      H.eq("b1.txt", session.focus_id)
+      H.eq({ "b1.txt" }, vim.tbl_keys(session.file_rows))
+      -- Focus draws one file, so ]f / [f switch it (wrapping), not the cursor.
+      press("]f")
+      H.eq("b2.txt", session.focus_id)
+      press("]f")
+      press("]f")
+      H.eq("b1.txt", session.focus_id)
+      press("[f")
+      H.eq("b3.txt", session.focus_id)
+      -- The next commit stays focused from its first file, on its message.
+      press("<Tab>")
+      H.ok(shows(session, 2))
+      H.eq("a1.txt", session.focus_id)
+      H.eq({ 1, 0 }, api.nvim_win_get_cursor(session.main_win))
+      press("]f")
+      H.eq("a2.txt", session.focus_id)
+      press("gf")
+      H.eq(nil, session.focus_id)
+      H.eq(3, #vim.tbl_keys(session.file_rows))
+    end)
+    session:close()
+    vim.notify = previous_notify
+    vim.fn.delete(root, "rf")
+    if not ok then
+      error(err, 0)
+    end
+  end,
+
   ["tabs in a message expand to git's 8-column stops"] = function()
     local root = vim.uv.fs_realpath(H.repo())
     H.write(root, "a.txt", { "a" })
