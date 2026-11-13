@@ -129,14 +129,22 @@ file in the stream pushes later files down. On a code row, expansion finds the
 next gap in the same file; on a gap, it acts on that gap. context_step controls
 the number of lines revealed by zo, zB, and Enter on a gap.
 
-Enter always opens a real working file in a normal editing window. Historical
-lines map through later edits, including unsaved buffer edits. Deleted/changed
-lines use the nearest surviving line with a notice. Git renames are followed;
-deleted files produce a message and open nothing. An empty start screen or
-dashboard in the launch window can be reused. Sidebar, terminal, help and
-floating windows are never replaced. Files retain normal editing options;
-creating a source tab leaves no extra empty buffer. Selecting a file
-in the sidebar jumps to it in the stream, or switches the focused file.
+Enter always opens a real working file, in the review's file tab: a tab made
+right after the review on first use and reused by later Enters, with your
+normal editing options. Your own windows are never replaced; only a launch
+window holding nothing (a fresh empty buffer, start screen or dashboard) is
+reused instead. Historical lines map through later edits, including unsaved
+buffer edits. Deleted/changed lines use the nearest surviving line with a
+notice. Git renames are followed; deleted files produce a message and open
+nothing. Opening leaves no extra empty buffer. Selecting a file in the sidebar
+jumps to it in the stream, or switches the focused file.
+
+The review stays open in its own tab, and Enter counts as a jump: in the file
+window, CTRL-O returns to the review exactly as it was left (commit, cursor,
+folds and expansions). After further jumps there, CTRL-O first walks back
+through them as usual, then returns to the review. :q (or :wq, ZZ) on the file
+tab's last window also returns to the review. A count (3 CTRL-O) and windows
+Rill did not fill keep the ordinary CTRL-O.
 
 The Files panel automatically fits visible entries, capped at tree.max_width
 and tree.max_ratio. tree_width sets its initial/content-fitting minimum.
